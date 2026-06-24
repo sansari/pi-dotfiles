@@ -1,0 +1,7 @@
+auth.json
+trust.json
+sessions/
+npm/
+git/
+bin/
+models.json

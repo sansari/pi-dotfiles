@@ -1,0 +1,16 @@
+{
+  "packages": [
+    "npm:@demigodmode/pi-web-agent"
+  ],
+  "lastChangelogVersion": "0.80.2",
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-6",
+  "defaultThinkingLevel": "medium",
+  "theme": "dark",
+  "warnings": {
+    "anthropicExtraUsage": false
+  },
+  "terminal": {
+    "showTerminalProgress": true
+  }
+}
