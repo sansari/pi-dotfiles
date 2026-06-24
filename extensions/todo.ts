@@ -1,18 +1,18 @@
 /**
- * Todo Extension - Demonstrates state management via session entries
+ * Todo Extension - File-backed todo list using todo.md
  *
  * This extension:
+ * - Reads and writes todos from/to `todo.md` in the current working directory
+ * - Preserves markdown structure (sections, headings, non-todo lines) on round-trips
  * - Registers a `todo` tool for the LLM to manage todos
  * - Registers a `/todos` command for users to view the list
- *
- * State is stored in tool result details (not external files), which allows
- * proper branching - when you branch, the todo state is automatically
- * correct for that point in history.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { Type } from "typebox";
 
 interface Todo {
@@ -27,6 +27,11 @@ interface TodoDetails {
 	nextId: number;
 	error?: string;
 }
+
+// File block for round-trip preservation of markdown structure
+type FileBlock =
+	| { type: "text"; content: string }
+	| { type: "todo"; id: number };
 
 const TodoParams = Type.Object({
 	action: StringEnum(["list", "add", "toggle", "clear"] as const),
@@ -103,43 +108,109 @@ class TodoListComponent {
 }
 
 export default function (pi: ExtensionAPI) {
-	// In-memory state (reconstructed from session on load)
+	// In-memory state loaded from todo.md
 	let todos: Todo[] = [];
 	let nextId = 1;
+	let fileBlocks: FileBlock[] = []; // For round-trip preservation of markdown structure
+	let todosFilePath: string | null = null;
 
 	/**
-	 * Reconstruct state from session entries.
-	 * Scans tool results for this tool and applies them in order.
+	 * Parse todo.md into todos and fileBlocks (preserving all non-todo lines).
 	 */
-	const reconstructState = (ctx: ExtensionContext) => {
+	async function loadFromFile(): Promise<void> {
+		if (!todosFilePath) return;
+
 		todos = [];
 		nextId = 1;
+		fileBlocks = [];
 
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type !== "message") continue;
-			const msg = entry.message;
-			if (msg.role !== "toolResult" || msg.toolName !== "todo") continue;
+		let content: string;
+		try {
+			content = await fs.readFile(todosFilePath, "utf-8");
+		} catch {
+			// File doesn't exist yet — start empty
+			return;
+		}
 
-			const details = msg.details as TodoDetails | undefined;
-			if (details) {
-				todos = details.todos;
-				nextId = details.nextId;
+		// Split preserving trailing newline behavior
+		const lines = content.split("\n");
+		let id = 1;
+
+		for (const line of lines) {
+			const match = line.match(/^- \[([ x])\] (.+)$/);
+			if (match) {
+				const done = match[1] === "x";
+				const text = match[2];
+				todos.push({ id, text, done });
+				fileBlocks.push({ type: "todo", id });
+				id++;
+			} else {
+				fileBlocks.push({ type: "text", content: line });
 			}
 		}
-	};
+		nextId = id;
+	}
 
-	// Reconstruct state on session events
-	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
-	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx));
+	/**
+	 * Write current todos back to todo.md, preserving all non-todo lines.
+	 * New todos (not in fileBlocks) are appended at the end.
+	 */
+	async function saveToFile(): Promise<void> {
+		if (!todosFilePath) return;
+
+		const todoMap = new Map(todos.map((t) => [t.id, t]));
+		const renderedIds = new Set<number>();
+		const lines: string[] = [];
+
+		for (const block of fileBlocks) {
+			if (block.type === "text") {
+				lines.push(block.content);
+			} else {
+				const todo = todoMap.get(block.id);
+				if (todo) {
+					lines.push(`- [${todo.done ? "x" : " "}] ${todo.text}`);
+					renderedIds.add(todo.id);
+				}
+				// Cleared todos: omit their block entirely
+			}
+		}
+
+		// Append any new todos that aren't in fileBlocks yet
+		for (const todo of todos) {
+			if (!renderedIds.has(todo.id)) {
+				fileBlocks.push({ type: "todo", id: todo.id });
+				lines.push(`- [${todo.done ? "x" : " "}] ${todo.text}`);
+			}
+		}
+
+		await fs.writeFile(todosFilePath, lines.join("\n"), "utf-8");
+	}
+
+	// Load from file on session start / tree navigation
+	pi.on("session_start", async (_event, ctx) => {
+		todosFilePath = path.join(ctx.cwd, "todo.md");
+		await loadFromFile();
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		todosFilePath = path.join(ctx.cwd, "todo.md");
+		await loadFromFile();
+	});
 
 	// Register the todo tool for the LLM
 	pi.registerTool({
 		name: "todo",
 		label: "Todo",
-		description: "Manage a todo list. Actions: list, add (text), toggle (id), clear",
+		description: "Manage a todo list backed by todo.md. Actions: list, add (text), toggle (id), clear",
 		parameters: TodoParams,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			// Ensure file path is set (in case session_start hasn't fired yet)
+			if (!todosFilePath) {
+				todosFilePath = path.join(ctx.cwd, "todo.md");
+				await loadFromFile();
+			}
+
 			switch (params.action) {
 				case "list":
 					return {
@@ -163,6 +234,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					const newTodo: Todo = { id: nextId++, text: params.text, done: false };
 					todos.push(newTodo);
+					await saveToFile();
 					return {
 						content: [{ type: "text", text: `Added todo #${newTodo.id}: ${newTodo.text}` }],
 						details: { action: "add", todos: [...todos], nextId } as TodoDetails,
@@ -189,6 +261,7 @@ export default function (pi: ExtensionAPI) {
 						};
 					}
 					todo.done = !todo.done;
+					await saveToFile();
 					return {
 						content: [{ type: "text", text: `Todo #${todo.id} ${todo.done ? "completed" : "uncompleted"}` }],
 						details: { action: "toggle", todos: [...todos], nextId } as TodoDetails,
@@ -199,6 +272,9 @@ export default function (pi: ExtensionAPI) {
 					const count = todos.length;
 					todos = [];
 					nextId = 1;
+					// Remove todo blocks from fileBlocks so they're omitted on next save
+					fileBlocks = fileBlocks.filter((b) => b.type === "text");
+					await saveToFile();
 					return {
 						content: [{ type: "text", text: `Cleared ${count} todos` }],
 						details: { action: "clear", todos: [], nextId: 1 } as TodoDetails,
@@ -282,12 +358,15 @@ export default function (pi: ExtensionAPI) {
 
 	// Register the /todos command for users
 	pi.registerCommand("todos", {
-		description: "Show all todos on the current branch",
+		description: "Show all todos from todo.md",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/todos requires interactive mode", "error");
 				return;
 			}
+
+			// Reload from file so /todos always shows latest disk state
+			await loadFromFile();
 
 			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
 				return new TodoListComponent(todos, theme, () => done());
