@@ -10,6 +10,17 @@
 - After making CSS/HTML/layout/content-rendering changes, open the relevant page with Playwright, inspect the result, and confirm the change worked.
 - Only report back to the user once you've verified the changes are correct.
 
+### Native macOS apps (no browser available)
+
+- Do not use a full-screen `screencapture` or a fixed `-R x,y,w,h` region — both capture whatever happens to be on top at that moment (other windows, terminal chrome, etc.), not reliably the app under test.
+- Instead, resolve the target window's actual `CGWindowNumber` and capture that specific window regardless of stacking order:
+  1. Write a tiny throwaway Swift script that calls `CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)`, filters by `kCGWindowOwnerName` (the app name), and prints `kCGWindowNumber` (see `/tmp/winid.swift` pattern — recreate as needed, it's ~10 lines).
+  2. Run it with `swift /tmp/winid.swift` to get the window id.
+  3. Capture with `screencapture -x -o -l<windowid> /tmp/out.png` (`-o` omits the window shadow).
+- This requires the user to have granted Screen Recording permission to the terminal/process pi is running in (System Settings → Privacy & Security → Screen Recording). If `screencapture` fails with "could not create image from display", ask the user to grant it rather than assuming screenshots are unavailable — it's a one-time grant, not a hard blocker.
+- AppleScript via `System Events` (window bounds, activation, clicking) commonly hits `-1743 Not authorized to send Apple events` in this environment and individual apps rarely expose window bounds via their own default Standard Suite either — don't rely on it for locating windows; use the `CGWindowListCopyWindowInfo` approach above instead, which only needs Screen Recording permission, not Automation permission.
+- Crop/zoom into a specific region of a captured screenshot with `ffmpeg -y -i in.png -vf "crop=W:H:X:Y" -frames:v 1 out.png` (note: needs `-frames:v 1`, plain `ffmpeg... crop... out.png` errors on a single still image without it).
+
 ## Plans
 
 - Whenever you write or substantially revise a plan (milestone plans, implementation plans, specs, design docs, etc.), also generate a rendered HTML version of it and open it for the user to review, in addition to the markdown source.
