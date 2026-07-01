@@ -2,9 +2,9 @@
   "packages": [
     "npm:@demigodmode/pi-web-agent"
   ],
-  "lastChangelogVersion": "0.80.2",
+  "lastChangelogVersion": "0.80.3",
   "defaultProvider": "anthropic",
-  "defaultModel": "claude-sonnet-4-6",
+  "defaultModel": "claude-sonnet-5",
   "defaultThinkingLevel": "medium",
   "theme": "dark",
   "warnings": {
@@ -12,5 +12,8 @@
   },
   "terminal": {
     "showTerminalProgress": true
-  }
+  },
+  "followUpMode": "all",
+  "steeringMode": "all",
+  "quietStartup": true
 }
