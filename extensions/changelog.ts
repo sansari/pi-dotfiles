@@ -43,9 +43,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "update_changelog",
     label: "Update Changelog",
-    description: "Add an entry to CHANGELOG.md for the current changes",
+    description: "Add a date-based entry to CHANGELOG.md for the current changes",
     promptGuidelines: [
       "Before pushing code changes, use update_changelog to document what changed in CHANGELOG.md",
+      "Use date-based changelog sections (`## YYYY-MM-DD`), not version or [Unreleased] sections",
       "Changelog entries should be concise, user-focused, and categorized (Added/Changed/Fixed/Removed)",
     ],
     parameters: Type.Object({
@@ -65,24 +66,22 @@ export default function (pi: ExtensionAPI) {
         const content = readFileSync(CHANGELOG_PATH, "utf-8");
         const lines = content.split("\n");
 
-        // Find the Unreleased section
-        const unreleasedIdx = lines.findIndex((l) => l.startsWith("## [Unreleased]"));
-        if (unreleasedIdx === -1) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Error: Could not find ## [Unreleased] section in CHANGELOG.md",
-              },
-            ],
-            isError: true,
-          };
+        const today = new Date().toISOString().slice(0, 10);
+
+        // Find or create today's date section. Changelogs in these repos are
+        // date-based because release/version cadence is intentionally slow.
+        let dateIdx = lines.findIndex((l) => l.trim() === `## ${today}`);
+        if (dateIdx === -1) {
+          const titleIdx = lines.findIndex((l) => l.startsWith("# "));
+          const insertIdx = titleIdx === -1 ? 0 : titleIdx + 1;
+          lines.splice(insertIdx, 0, "", `## ${today}`, "");
+          dateIdx = insertIdx + 1;
         }
 
-        // Find or create the category section
+        // Find or create the category section under today's date.
         let categoryIdx = -1;
-        for (let i = unreleasedIdx + 1; i < lines.length; i++) {
-          if (lines[i].startsWith("## ")) break; // Hit next version
+        for (let i = dateIdx + 1; i < lines.length; i++) {
+          if (lines[i].startsWith("## ")) break; // Hit next date
           if (lines[i] === `### ${params.category}`) {
             categoryIdx = i;
             break;
@@ -98,38 +97,45 @@ export default function (pi: ExtensionAPI) {
           });
 
         if (categoryIdx === -1) {
-          // Need to create the category section
-          // Find where to insert (after last existing category or after Unreleased header)
-          let insertIdx = unreleasedIdx + 1;
-          
-          // Skip blank line after Unreleased header if present
+          // Need to create the category section. Keep a predictable category
+          // order inside each date section: Added, Changed, Fixed, Removed.
+          const categoryOrder = ["Added", "Changed", "Fixed", "Removed"];
+          const desiredOrder = categoryOrder.indexOf(params.category);
+          let insertIdx = dateIdx + 1;
+
+          // Skip blank line after date header if present.
           if (insertIdx < lines.length && lines[insertIdx].trim() === "") {
             insertIdx++;
           }
 
-          // Skip to end of existing categories
-          while (insertIdx < lines.length && lines[insertIdx].startsWith("###")) {
-            insertIdx++;
-            // Skip category content
-            while (insertIdx < lines.length && !lines[insertIdx].startsWith("###") && !lines[insertIdx].startsWith("## ")) {
-              insertIdx++;
+          // Insert before the first later-order category, otherwise after all
+          // categories/content in the date section.
+          while (insertIdx < lines.length && !lines[insertIdx].startsWith("## ")) {
+            const categoryMatch = lines[insertIdx].match(/^### (.+)$/);
+            if (categoryMatch) {
+              const existingOrder = categoryOrder.indexOf(categoryMatch[1]);
+              if (existingOrder !== -1 && existingOrder > desiredOrder) break;
             }
+            insertIdx++;
           }
 
-          // Insert category with entry
-          const categoryOrder = ["Fixed", "Added", "Changed", "Removed"];
-          const needsBlankLineBefore = insertIdx > unreleasedIdx + 1 && lines[insertIdx - 1].trim() !== "";
-          
+          const needsBlankLineBefore = insertIdx > dateIdx + 1 && lines[insertIdx - 1].trim() !== "";
+          const needsBlankLineAfter = insertIdx < lines.length && lines[insertIdx].trim() !== "";
           lines.splice(
             insertIdx,
             0,
             ...(needsBlankLineBefore ? [""] : []),
             `### ${params.category}`,
+            "",
             ...entryLines,
+            ...(needsBlankLineAfter ? [""] : []),
           );
         } else {
-          // Insert into existing category (at the top, after the category header)
-          lines.splice(categoryIdx + 1, 0, ...entryLines);
+          // Insert into existing category at the top, after the heading and
+          // optional blank spacer.
+          let insertIdx = categoryIdx + 1;
+          if (insertIdx < lines.length && lines[insertIdx].trim() === "") insertIdx++;
+          lines.splice(insertIdx, 0, ...entryLines);
         }
 
         writeFileSync(CHANGELOG_PATH, lines.join("\n"));
@@ -138,7 +144,7 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: `✓ Added to CHANGELOG.md under ${params.category}:\n${params.description}`,
+              text: `✓ Added to CHANGELOG.md under ${today} / ${params.category}:\n${params.description}`,
             },
           ],
         };
@@ -167,7 +173,7 @@ export default function (pi: ExtensionAPI) {
           return {
             message: {
               customType: "changelog-reminder",
-              content: `⚠️  Staged changes without changelog update:\n${files.slice(0, 5).join("\n")}${files.length > 5 ? `\n... and ${files.length - 5} more` : ""}\n\nConsider using update_changelog before pushing.`,
+              content: `⚠️  Staged changes without changelog update:\n${files.slice(0, 5).join("\n")}${files.length > 5 ? `\n... and ${files.length - 5} more` : ""}\n\nConsider using update_changelog before pushing. It will add entries under today's date section (## YYYY-MM-DD).`,
               display: true,
             },
           };
