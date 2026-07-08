@@ -47,47 +47,57 @@ async function dirtySummary(): Promise<string> {
 /// always) and then retry the pull. Any other pull failure (no network,
 /// diverged history, ...) is just surfaced — never auto-escalated to a push.
 async function autoSyncOnStartup(ctx: ExtensionContext): Promise<void> {
-  const pull = await runSync("pull");
+  const STATUS_KEY = "sync-config";
+  ctx.ui.setStatus(STATUS_KEY, "Syncing your global pi config…");
 
-  if (pull.ok) {
-    if (!pull.output.startsWith("already up to date")) {
-      ctx.ui.notify(`sync-config pull:\n${truncate(pull.output)}`, "info");
+  try {
+    const pull = await runSync("pull");
+
+    if (pull.ok) {
+      if (!pull.output.startsWith("already up to date")) {
+        ctx.ui.notify(`Global pi config updated:\n${truncate(pull.output)}`, "info");
+        await ctx.reload();
+      }
+      return;
+    }
+
+    if (!pull.output.includes("local changes present")) {
+      ctx.ui.notify(`Syncing your global pi config failed:\n${truncate(pull.output)}`, "error");
+      return;
+    }
+
+    ctx.ui.setStatus(STATUS_KEY, "Global pi config has local changes…");
+    const summary = await dirtySummary();
+    const confirmed = await ctx.ui.confirm(
+      "pi config out of sync",
+      `~/.pi/agent has local changes that need to be pushed before it can pull:\n\n${summary}\n\nPush to pi-dotfiles now?`,
+    );
+
+    if (!confirmed) {
+      ctx.ui.notify("sync-config: left local changes unpushed. Run /sync-config push when ready.", "info");
+      return;
+    }
+
+    ctx.ui.setStatus(STATUS_KEY, "Pushing your global pi config…");
+    const push = await runSync("push");
+    if (!push.ok) {
+      ctx.ui.notify(`Pushing your global pi config failed:\n${truncate(push.output)}`, "error");
+      return;
+    }
+    ctx.ui.notify(`Global pi config pushed:\n${truncate(push.output)}`, "info");
+
+    ctx.ui.setStatus(STATUS_KEY, "Syncing your global pi config…");
+    const retryPull = await runSync("pull");
+    if (!retryPull.ok) {
+      ctx.ui.notify(`Syncing your global pi config failed:\n${truncate(retryPull.output)}`, "error");
+      return;
+    }
+    if (!retryPull.output.startsWith("already up to date")) {
+      ctx.ui.notify(`Global pi config updated:\n${truncate(retryPull.output)}`, "info");
       await ctx.reload();
     }
-    return;
-  }
-
-  if (!pull.output.includes("local changes present")) {
-    ctx.ui.notify(`sync-config pull failed:\n${truncate(pull.output)}`, "error");
-    return;
-  }
-
-  const summary = await dirtySummary();
-  const confirmed = await ctx.ui.confirm(
-    "pi config out of sync",
-    `~/.pi/agent has local changes that need to be pushed before it can pull:\n\n${summary}\n\nPush to pi-dotfiles now?`,
-  );
-
-  if (!confirmed) {
-    ctx.ui.notify("sync-config: left local changes unpushed. Run /sync-config push when ready.", "info");
-    return;
-  }
-
-  const push = await runSync("push");
-  if (!push.ok) {
-    ctx.ui.notify(`sync-config push failed:\n${truncate(push.output)}`, "error");
-    return;
-  }
-  ctx.ui.notify(`sync-config push:\n${truncate(push.output)}`, "info");
-
-  const retryPull = await runSync("pull");
-  if (!retryPull.ok) {
-    ctx.ui.notify(`sync-config pull failed:\n${truncate(retryPull.output)}`, "error");
-    return;
-  }
-  if (!retryPull.output.startsWith("already up to date")) {
-    ctx.ui.notify(`sync-config pull:\n${truncate(retryPull.output)}`, "info");
-    await ctx.reload();
+  } finally {
+    ctx.ui.setStatus(STATUS_KEY, "");
   }
 }
 
