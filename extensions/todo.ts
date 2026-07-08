@@ -5,6 +5,7 @@
  * - Reads and writes todos from/to `TODO.md` (falling back to `todo.md`) in the current working directory
  * - Preserves markdown structure (sections, headings, non-todo lines) on round-trips
  * - Understands the Pi Native-style priority sections: P0/P1/P2/P3
+ * - Completes todos by removing them from the active list
  * - Registers a `todo` tool for the LLM to manage todos
  * - Registers a `/todos` command for users to open the list in the system Markdown app
  */
@@ -20,7 +21,6 @@ import { Type } from "typebox";
 interface Todo {
 	id: number;
 	text: string;
-	done: boolean;
 }
 
 interface TodoDetails {
@@ -94,7 +94,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Parse todo.md into todos and fileBlocks (preserving all non-todo lines).
+	 * Parse TODO.md/todo.md into active todos and fileBlocks, preserving all
+	 * non-todo lines. Legacy checked todos are dropped on the next save.
 	 */
 	async function loadFromFile(): Promise<void> {
 		if (!todosFilePath) return;
@@ -118,11 +119,13 @@ export default function (pi: ExtensionAPI) {
 		for (const line of lines) {
 			const match = line.match(/^- \[([ x])\] (.+)$/);
 			if (match) {
-				const done = match[1] === "x";
 				const text = match[2];
-				todos.push({ id, text, done });
-				fileBlocks.push({ type: "todo", id });
-				id++;
+				if (match[1] !== "x") {
+					todos.push({ id, text });
+					fileBlocks.push({ type: "todo", id });
+					id++;
+				}
+				// Legacy checked todos are omitted: completed means deleted.
 			} else {
 				fileBlocks.push({ type: "text", content: line });
 			}
@@ -164,8 +167,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Write current todos back to TODO.md/todo.md, preserving all non-todo lines.
-	 * New todos (not in fileBlocks) are appended to P1 by default.
+	 * Write current active todos back to TODO.md/todo.md, preserving all
+	 * non-todo lines. Completed/cleared todos are omitted.
 	 */
 	async function saveToFile(): Promise<void> {
 		if (!todosFilePath) return;
@@ -180,10 +183,10 @@ export default function (pi: ExtensionAPI) {
 			} else {
 				const todo = todoMap.get(block.id);
 				if (todo) {
-					lines.push(`- [${todo.done ? "x" : " "}] ${todo.text}`);
+					lines.push(`- [ ] ${todo.text}`);
 					renderedIds.add(todo.id);
 				}
-				// Cleared todos: omit their block entirely
+				// Cleared/completed todos: omit their active block entirely
 			}
 		}
 
@@ -213,7 +216,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "todo",
 		label: "Todo",
-		description: "Manage a todo list backed by TODO.md/todo.md. Actions: list, add (text, optional priority P0/P1/P2/P3, optional kind feat/bug), toggle (id), clear",
+		description: "Manage a todo list backed by TODO.md/todo.md. Actions: list, add (text, optional priority P0/P1/P2/P3, optional kind feat/bug), toggle/complete/delete (id), clear",
 		parameters: TodoParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -230,7 +233,7 @@ export default function (pi: ExtensionAPI) {
 							{
 								type: "text",
 								text: todos.length
-									? todos.map((t) => `[${t.done ? "x" : " "}] #${t.id}: ${t.text}`).join("\n")
+									? todos.map((t) => `[ ] #${t.id}: ${t.text}`).join("\n")
 									: "No todos",
 							},
 						],
@@ -246,7 +249,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					const priority = (params.priority ?? "P1") as TodoPriority;
 					const kind = (params.kind ?? (priority === "P0" ? "bug" : "feat")) as TodoKind;
-					const newTodo: Todo = { id: nextId++, text: formatTodoText(params.text, kind), done: false };
+					const newTodo: Todo = { id: nextId++, text: formatTodoText(params.text, kind) };
 					todos.push(newTodo);
 					insertTodoIntoPrioritySection(newTodo.id, priority);
 					await saveToFile();
@@ -275,10 +278,11 @@ export default function (pi: ExtensionAPI) {
 							} as TodoDetails,
 						};
 					}
-					todo.done = !todo.done;
+					fileBlocks = fileBlocks.filter((block) => block.type !== "todo" || block.id !== todo.id);
+					todos = todos.filter((t) => t.id !== todo.id);
 					await saveToFile();
 					return {
-						content: [{ type: "text", text: `Todo #${todo.id} ${todo.done ? "completed" : "uncompleted"}` }],
+						content: [{ type: "text", text: `Completed and removed todo #${todo.id}: ${todo.text}` }],
 						details: { action: "toggle", todos: [...todos], nextId } as TodoDetails,
 					};
 				}
@@ -337,9 +341,7 @@ export default function (pi: ExtensionAPI) {
 					let listText = theme.fg("muted", `${todoList.length} todo(s):`);
 					const display = expanded ? todoList : todoList.slice(0, 5);
 					for (const t of display) {
-						const check = t.done ? theme.fg("success", "✓") : theme.fg("dim", "○");
-						const itemText = t.done ? theme.fg("dim", t.text) : theme.fg("muted", t.text);
-						listText += `\n${check} ${theme.fg("accent", `#${t.id}`)} ${itemText}`;
+						listText += `\n${theme.fg("dim", "○")} ${theme.fg("accent", `#${t.id}`)} ${theme.fg("muted", t.text)}`;
 					}
 					if (!expanded && todoList.length > 5) {
 						listText += `\n${theme.fg("dim", `... ${todoList.length - 5} more`)}`;
