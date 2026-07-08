@@ -1,11 +1,12 @@
 /**
- * Todo Extension - File-backed todo list using todo.md
+ * Todo Extension - File-backed todo list using TODO.md
  *
  * This extension:
- * - Reads and writes todos from/to `todo.md` in the current working directory
+ * - Reads and writes todos from/to `TODO.md` (falling back to `todo.md`) in the current working directory
  * - Preserves markdown structure (sections, headings, non-todo lines) on round-trips
+ * - Understands the Pi Native-style priority sections: P0/P1/P2/P3
  * - Registers a `todo` tool for the LLM to manage todos
- * - Registers a `/todos` command for users to view the list
+ * - Registers a `/todos` command for users to open the list in the system Markdown app
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -36,8 +37,10 @@ type FileBlock =
 
 const TodoParams = Type.Object({
 	action: StringEnum(["list", "add", "toggle", "clear"] as const),
-	text: Type.Optional(Type.String({ description: "Todo text (for add)" })),
+	text: Type.Optional(Type.String({ description: "Todo text (for add). Plain text is formatted as `**(feat|bug) Text.**`; already-formatted markdown is preserved." })),
 	id: Type.Optional(Type.Number({ description: "Todo ID (for toggle)" })),
+	priority: Type.Optional(StringEnum(["P0", "P1", "P2", "P3"] as const)),
+	kind: Type.Optional(StringEnum(["feat", "bug"] as const)),
 });
 
 function openFile(filePath: string): void {
@@ -59,12 +62,36 @@ async function findTodosPreviewFile(cwd: string): Promise<string | null> {
 	return null;
 }
 
+type TodoPriority = "P0" | "P1" | "P2" | "P3";
+type TodoKind = "feat" | "bug";
+
+function formatTodoText(text: string, kind: TodoKind): string {
+	const trimmed = text.trim();
+	if (trimmed.startsWith("**(")) return trimmed;
+	const withPeriod = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+	return `**(${kind}) ${withPeriod}**`;
+}
+
+function sectionTitle(priority: TodoPriority): string {
+	switch (priority) {
+		case "P0": return "## P0: Critical";
+		case "P1": return "## P1: Next";
+		case "P2": return "## P2: Backlog";
+		case "P3": return "## P3: Ideas";
+	}
+}
+
 export default function (pi: ExtensionAPI) {
-	// In-memory state loaded from todo.md
+	// In-memory state loaded from TODO.md / todo.md
 	let todos: Todo[] = [];
 	let nextId = 1;
 	let fileBlocks: FileBlock[] = []; // For round-trip preservation of markdown structure
 	let todosFilePath: string | null = null;
+
+	async function ensureTodosFilePath(cwd: string): Promise<void> {
+		const existing = await findTodosPreviewFile(cwd);
+		todosFilePath = existing ?? path.join(cwd, "TODO.md");
+	}
 
 	/**
 	 * Parse todo.md into todos and fileBlocks (preserving all non-todo lines).
@@ -103,9 +130,42 @@ export default function (pi: ExtensionAPI) {
 		nextId = id;
 	}
 
+	function insertTodoIntoPrioritySection(todoID: number, priority: TodoPriority): void {
+		const desiredHeading = sectionTitle(priority);
+		let headingIdx = fileBlocks.findIndex((block) => block.type === "text" && block.content.trim() === desiredHeading);
+
+		if (headingIdx === -1) {
+			// Keep the current repo convention: new sections are appended with a
+			// blank line separator if they don't exist yet.
+			if (fileBlocks.length > 0 && fileBlocks[fileBlocks.length - 1]?.type === "text" && fileBlocks[fileBlocks.length - 1].content.trim() !== "") {
+				fileBlocks.push({ type: "text", content: "" });
+			}
+			fileBlocks.push({ type: "text", content: desiredHeading }, { type: "text", content: "" });
+			headingIdx = fileBlocks.length - 2;
+		}
+
+		let insertIdx = headingIdx + 1;
+		while (insertIdx < fileBlocks.length) {
+			const block = fileBlocks[insertIdx];
+			if (block.type === "text" && block.content.startsWith("## ")) break;
+			insertIdx++;
+		}
+
+		// Insert at the end of the chosen section, before the next section header.
+		// If the section ends with a blank spacer, insert before that spacer so
+		// the Markdown remains visually tidy.
+		if (insertIdx > headingIdx + 1) {
+			const previous = fileBlocks[insertIdx - 1];
+			if (previous?.type === "text" && previous.content.trim() === "") {
+				insertIdx--;
+			}
+		}
+		fileBlocks.splice(insertIdx, 0, { type: "todo", id: todoID });
+	}
+
 	/**
-	 * Write current todos back to todo.md, preserving all non-todo lines.
-	 * New todos (not in fileBlocks) are appended at the end.
+	 * Write current todos back to TODO.md/todo.md, preserving all non-todo lines.
+	 * New todos (not in fileBlocks) are appended to P1 by default.
 	 */
 	async function saveToFile(): Promise<void> {
 		if (!todosFilePath) return;
@@ -127,11 +187,11 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		// Append any new todos that aren't in fileBlocks yet
+		// Append any new todos that aren't in fileBlocks yet to P1: Next.
 		for (const todo of todos) {
 			if (!renderedIds.has(todo.id)) {
-				fileBlocks.push({ type: "todo", id: todo.id });
-				lines.push(`- [${todo.done ? "x" : " "}] ${todo.text}`);
+				insertTodoIntoPrioritySection(todo.id, "P1");
+				return saveToFile();
 			}
 		}
 
@@ -140,12 +200,12 @@ export default function (pi: ExtensionAPI) {
 
 	// Load from file on session start / tree navigation
 	pi.on("session_start", async (_event, ctx) => {
-		todosFilePath = path.join(ctx.cwd, "todo.md");
+		await ensureTodosFilePath(ctx.cwd);
 		await loadFromFile();
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		todosFilePath = path.join(ctx.cwd, "todo.md");
+		await ensureTodosFilePath(ctx.cwd);
 		await loadFromFile();
 	});
 
@@ -153,13 +213,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "todo",
 		label: "Todo",
-		description: "Manage a todo list backed by todo.md. Actions: list, add (text), toggle (id), clear",
+		description: "Manage a todo list backed by TODO.md/todo.md. Actions: list, add (text, optional priority P0/P1/P2/P3, optional kind feat/bug), toggle (id), clear",
 		parameters: TodoParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			// Ensure file path is set (in case session_start hasn't fired yet)
 			if (!todosFilePath) {
-				todosFilePath = path.join(ctx.cwd, "todo.md");
+				await ensureTodosFilePath(ctx.cwd);
 				await loadFromFile();
 			}
 
@@ -184,11 +244,14 @@ export default function (pi: ExtensionAPI) {
 							details: { action: "add", todos: [...todos], nextId, error: "text required" } as TodoDetails,
 						};
 					}
-					const newTodo: Todo = { id: nextId++, text: params.text, done: false };
+					const priority = (params.priority ?? "P1") as TodoPriority;
+					const kind = (params.kind ?? (priority === "P0" ? "bug" : "feat")) as TodoKind;
+					const newTodo: Todo = { id: nextId++, text: formatTodoText(params.text, kind), done: false };
 					todos.push(newTodo);
+					insertTodoIntoPrioritySection(newTodo.id, priority);
 					await saveToFile();
 					return {
-						content: [{ type: "text", text: `Added todo #${newTodo.id}: ${newTodo.text}` }],
+						content: [{ type: "text", text: `Added ${priority} ${kind} todo #${newTodo.id}: ${newTodo.text}` }],
 						details: { action: "add", todos: [...todos], nextId } as TodoDetails,
 					};
 				}
