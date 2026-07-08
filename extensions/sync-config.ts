@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,7 +34,69 @@ function truncate(text: string, maxLines = 25): string {
   return [...lines.slice(0, maxLines), `… (${lines.length - maxLines} more lines, see terminal)`].join("\n");
 }
 
+async function dirtySummary(): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["status", "-s"], { cwd: REPO_ROOT, timeout: 10_000 });
+  return stdout.trim();
+}
+
+/// Runs once per real `pi` process launch (reason "startup" only — not for
+/// every `/new`/`/resume`/`/fork` within an already-running process, which
+/// would otherwise pop confirmation dialogs far too often). Order matches
+/// the agreed product behavior: try a pull first; only if it fails because
+/// of local uncommitted changes do we offer to push (with confirmation,
+/// always) and then retry the pull. Any other pull failure (no network,
+/// diverged history, ...) is just surfaced — never auto-escalated to a push.
+async function autoSyncOnStartup(ctx: ExtensionContext): Promise<void> {
+  const pull = await runSync("pull");
+
+  if (pull.ok) {
+    if (!pull.output.startsWith("already up to date")) {
+      ctx.ui.notify(`sync-config pull:\n${truncate(pull.output)}`, "info");
+      await ctx.reload();
+    }
+    return;
+  }
+
+  if (!pull.output.includes("local changes present")) {
+    ctx.ui.notify(`sync-config pull failed:\n${truncate(pull.output)}`, "error");
+    return;
+  }
+
+  const summary = await dirtySummary();
+  const confirmed = await ctx.ui.confirm(
+    "pi config out of sync",
+    `~/.pi/agent has local changes that need to be pushed before it can pull:\n\n${summary}\n\nPush to pi-dotfiles now?`,
+  );
+
+  if (!confirmed) {
+    ctx.ui.notify("sync-config: left local changes unpushed. Run /sync-config push when ready.", "info");
+    return;
+  }
+
+  const push = await runSync("push");
+  if (!push.ok) {
+    ctx.ui.notify(`sync-config push failed:\n${truncate(push.output)}`, "error");
+    return;
+  }
+  ctx.ui.notify(`sync-config push:\n${truncate(push.output)}`, "info");
+
+  const retryPull = await runSync("pull");
+  if (!retryPull.ok) {
+    ctx.ui.notify(`sync-config pull failed:\n${truncate(retryPull.output)}`, "error");
+    return;
+  }
+  if (!retryPull.output.startsWith("already up to date")) {
+    ctx.ui.notify(`sync-config pull:\n${truncate(retryPull.output)}`, "info");
+    await ctx.reload();
+  }
+}
+
 export default function (pi: ExtensionAPI) {
+  pi.on("session_start", async (event, ctx) => {
+    if (event.reason !== "startup") return;
+    await autoSyncOnStartup(ctx);
+  });
+
   pi.registerCommand("sync-config", {
     description: "Sync ~/.pi/agent with its git remote (pull|push|status, default: pull)",
     handler: async (args, ctx) => {
