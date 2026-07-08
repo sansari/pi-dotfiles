@@ -3,8 +3,8 @@
     "npm:@demigodmode/pi-web-agent"
   ],
   "lastChangelogVersion": "0.80.3",
-  "defaultProvider": "anthropic",
-  "defaultModel": "claude-sonnet-5",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "medium",
   "hideThinkingBlock": false,
   "theme": "dark",

@@ -13,6 +13,7 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 import { Type } from "typebox";
 
 interface Todo {
@@ -105,6 +106,118 @@ class TodoListComponent {
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
 	}
+}
+
+function escapeHtml(text: string): string {
+	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function renderInlineMarkdown(text: string): string {
+	let rendered = escapeHtml(text);
+	rendered = rendered.replace(/`([^`]+)`/g, "<code>$1</code>");
+	rendered = rendered.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+	rendered = rendered.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => {
+		const safeHref = String(href).replace(/"/g, "%22");
+		const external = /^https?:/.test(safeHref) ? ' target="_blank" rel="noopener"' : "";
+		return `<a href="${safeHref}"${external}>${label}</a>`;
+	});
+	return rendered;
+}
+
+function renderTodosMarkdown(markdown: string, title: string): string {
+	const lines = markdown.split("\n");
+	const html: string[] = [];
+	let listOpen = false;
+
+	const closeList = () => {
+		if (listOpen) {
+			html.push("</ul>");
+			listOpen = false;
+		}
+	};
+
+	for (const line of lines) {
+		const heading = line.match(/^(#{1,6})\s+(.+)$/);
+		if (heading) {
+			closeList();
+			const level = heading[1].length;
+			html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+			continue;
+		}
+
+		const item = line.match(/^\s*[-*]\s+(.*)$/);
+		if (item) {
+			if (!listOpen) {
+				html.push("<ul>");
+				listOpen = true;
+			}
+			let body = item[1];
+			let checkbox = "";
+			if (/^\[x\]\s+/i.test(body)) {
+				checkbox = '<span class="box done">☑</span>';
+				body = body.replace(/^\[x\]\s+/i, "");
+			} else if (/^\[ \]\s+/.test(body)) {
+				checkbox = '<span class="box">☐</span>';
+				body = body.replace(/^\[ \]\s+/, "");
+			}
+			html.push(`<li>${checkbox}${renderInlineMarkdown(body)}</li>`);
+			continue;
+		}
+
+		if (line.trim() === "") {
+			closeList();
+			continue;
+		}
+
+		closeList();
+		html.push(`<p>${renderInlineMarkdown(line)}</p>`);
+	}
+	closeList();
+
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--fg:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--border:#30363d;--code:#1f2630;--done:#3fb950;}
+@media (prefers-color-scheme: light){:root{--bg:#fff;--panel:#f6f8fa;--fg:#1f2328;--muted:#636c76;--accent:#0969da;--border:#d0d7de;--code:#f0f3f6;--done:#1a7f37;}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+main{max-width:900px;margin:0 auto;padding:36px 44px 120px;}
+.header{display:flex;align-items:baseline;justify-content:space-between;gap:24px;border-bottom:1px solid var(--border);margin-bottom:22px;padding-bottom:10px;}
+h1{font-size:30px;margin:0;} .generated{color:var(--muted);font-size:13px;white-space:nowrap;}
+h2{font-size:22px;margin:1.35em 0 .35em;border-bottom:1px solid var(--border);padding-bottom:.2em;}
+h3{font-size:18px;margin:1.1em 0 .25em;} p{margin:.55em 0;color:var(--fg);} ul{padding-left:0;list-style:none;margin:.45em 0 1em;} li{padding:5px 0 5px 28px;position:relative;border-bottom:1px solid color-mix(in srgb,var(--border) 55%,transparent);} li:last-child{border-bottom:0;}
+a{color:var(--accent)} code{background:var(--code);border-radius:5px;padding:.15em .4em;font:13.5px ui-monospace,SFMono-Regular,Menlo,monospace;}
+.box{position:absolute;left:0;top:5px;color:var(--muted);font-weight:700;} .box.done{color:var(--done);}
+</style>
+</head>
+<body><main>
+<div class="header"><h1>${escapeHtml(title)}</h1><div class="generated">Generated ${new Date().toLocaleString()}</div></div>
+${html.join("\n")}
+</main></body>
+</html>`;
+}
+
+function openInBrowser(filePath: string): void {
+	const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+	const child = spawn(command, [filePath], { stdio: "ignore", detached: true, shell: process.platform === "win32" });
+	child.unref();
+}
+
+async function findTodosPreviewFile(cwd: string): Promise<string | null> {
+	for (const filename of ["TODO.md", "todo.md"]) {
+		const candidate = path.join(cwd, filename);
+		try {
+			await fs.access(candidate);
+			return candidate;
+		} catch {
+			// Try the next conventional filename.
+		}
+	}
+	return null;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -358,19 +471,23 @@ export default function (pi: ExtensionAPI) {
 
 	// Register the /todos command for users
 	pi.registerCommand("todos", {
-		description: "Show all todos from todo.md",
+		description: "Open an HTML preview of TODO.md (or todo.md) in the browser",
 		handler: async (_args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("/todos requires interactive mode", "error");
+			const todoMarkdownPath = await findTodosPreviewFile(ctx.cwd);
+			if (!todoMarkdownPath) {
+				ctx.ui.notify("No TODO.md or todo.md found in this project.", "warning");
 				return;
 			}
 
-			// Reload from file so /todos always shows latest disk state
-			await loadFromFile();
-
-			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
-				return new TodoListComponent(todos, theme, () => done());
-			});
+			try {
+				const markdown = await fs.readFile(todoMarkdownPath, "utf-8");
+				const outputPath = path.join(ctx.cwd, "TODO.html");
+				await fs.writeFile(outputPath, renderTodosMarkdown(markdown, path.basename(todoMarkdownPath)), "utf-8");
+				openInBrowser(outputPath);
+				ctx.ui.notify(`Opened TODO preview: ${outputPath}`, "info");
+			} catch (error) {
+				ctx.ui.notify(`/todos failed: ${(error as Error).message}`, "error");
+			}
 		},
 	});
 }
