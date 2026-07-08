@@ -6,3 +6,4 @@ git/
 bin/
 models.json
 extensions/supacode/
+scripts/*.log

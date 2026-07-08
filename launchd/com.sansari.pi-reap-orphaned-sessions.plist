@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs scripts/reap-orphaned-pi-sessions.sh every 15 minutes to clean up
+  `pi` CLI processes that have become detached from any controlling
+  terminal (crashed/force-closed terminal windows, disconnected SSH
+  sessions, etc). See that script's header comment for the exact,
+  conservative criteria it uses before killing anything.
+
+  Install (also done by scripts/install-launchd-jobs.sh):
+    cp launchd/com.sansari.pi-reap-orphaned-sessions.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sansari.pi-reap-orphaned-sessions.plist
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.sansari.pi-reap-orphaned-sessions
+    rm ~/Library/LaunchAgents/com.sansari.pi-reap-orphaned-sessions.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sansari.pi-reap-orphaned-sessions</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>"$HOME/.pi/agent/scripts/reap-orphaned-pi-sessions.sh"</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/pi-reap-orphaned-sessions.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/pi-reap-orphaned-sessions.stderr.log</string>
+</dict>
+</plist>

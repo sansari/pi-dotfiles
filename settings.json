@@ -6,6 +6,7 @@
   "defaultProvider": "anthropic",
   "defaultModel": "claude-sonnet-5",
   "defaultThinkingLevel": "medium",
+  "hideThinkingBlock": false,
   "theme": "dark",
   "warnings": {
     "anthropicExtraUsage": false
