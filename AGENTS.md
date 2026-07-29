@@ -21,6 +21,23 @@
 - AppleScript via `System Events` (window bounds, activation, clicking) commonly hits `-1743 Not authorized to send Apple events` in this environment and individual apps rarely expose window bounds via their own default Standard Suite either — don't rely on it for locating windows; use the `CGWindowListCopyWindowInfo` approach above instead, which only needs Screen Recording permission, not Automation permission.
 - Crop/zoom into a specific region of a captured screenshot with `ffmpeg -y -i in.png -vf "crop=W:H:X:Y" -frames:v 1 out.png` (note: needs `-frames:v 1`, plain `ffmpeg... crop... out.png` errors on a single still image without it).
 
+## Communication
+
+- Keep tool-step narration terse: one short sentence such as “Rebuilding and inspecting.” Avoid long status explanations unless the user asks for details.
+
+## Independent implementation review
+
+After making non-trivial implementation changes, perform an independent fresh-context code review before reporting completion.
+
+This is separate from 2119 requirement/test review. The review must inspect the implementation diff for correctness, architecture, race conditions, UI/UX regressions, error handling, and maintainability.
+
+Workflow:
+1. Finish implementation and local tests.
+2. Review the relevant diff.
+3. Ask a fresh-context reviewer/subagent to review the implementation diff.
+4. Fix blocking findings or explicitly document why they are deferred.
+5. Do not call the task complete until this review is done.
+
 ## Plans
 
 - Whenever you write or substantially revise a plan (milestone plans, implementation plans, specs, design docs, etc.), also generate a rendered HTML version of it and open it for the user to review, in addition to the markdown source.
