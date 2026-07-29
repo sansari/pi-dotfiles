@@ -25,18 +25,19 @@
 
 - Keep tool-step narration terse: one short sentence such as “Rebuilding and inspecting.” Avoid long status explanations unless the user asks for details.
 
-## Independent implementation review
+## Development workflow
 
-After making non-trivial implementation changes, perform an independent fresh-context code review before reporting completion.
+For non-trivial implementation work, complete the loop in this order before reporting completion:
 
-This is separate from 2119 requirement/test review. The review must inspect the implementation diff for correctness, architecture, race conditions, UI/UX regressions, error handling, and maintainability.
+1. Make the requested change.
+2. Manually verify the change yourself where applicable, following the Visual Verification rules above.
+3. Review the implementation diff for correctness, architecture, race conditions, UI/UX regressions, error handling, and maintainability.
+4. Ask a fresh-context reviewer/subagent to review the implementation diff when available.
+5. Fix blocking review findings, or explicitly document why they are deferred.
+6. Update and run relevant automated tests.
+7. Recheck requirements with `npx rfc2119 check` when the repository uses 2119.
 
-Workflow:
-1. Finish implementation and local tests.
-2. Review the relevant diff.
-3. Ask a fresh-context reviewer/subagent to review the implementation diff.
-4. Fix blocking findings or explicitly document why they are deferred.
-5. Do not call the task complete until this review is done.
+The implementation review is separate from 2119 requirement/test review. Do not mark the task complete until verification, review, tests, and requirement checks are done, or any blocker is clearly reported.
 
 ## Plans
 
