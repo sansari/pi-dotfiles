@@ -79,16 +79,42 @@ case "$mode" in
 
   push)
     git add -A
-    if git diff --cached --quiet; then
-      echo "nothing to sync — working tree matches last commit."
+    committed="no"
+    if ! git diff --cached --quiet; then
+      summary="$(git diff --cached --stat | tail -1)"
+      git commit --quiet -m "sync-config: update from $(hostname -s 2>/dev/null || hostname)"
+      committed="yes"
+    else
+      summary="no file changes"
+    fi
+
+    git fetch origin --quiet
+
+    if git merge-base --is-ancestor HEAD "$upstream"; then
+      git merge --ff-only "$upstream" --quiet
+      echo "updated from $upstream; nothing local to push."
       exit 0
     fi
 
-    summary="$(git diff --cached --stat | tail -1)"
-    git commit --quiet -m "sync-config: update from $(hostname -s 2>/dev/null || hostname)"
-    git push origin "$branch" --quiet
-    echo "pushed: $summary"
-    git log --oneline -1
+    if ! git merge-base --is-ancestor "$upstream" HEAD; then
+      if ! git merge --no-edit "$upstream" --quiet; then
+        echo "error: could not merge remote config changes. Resolve conflicts in $SCRIPT_DIR, then run './sync-config.sh push' again." >&2
+        exit 1
+      fi
+    fi
+
+    if git merge-base --is-ancestor "$upstream" HEAD; then
+      git push origin "$branch" --quiet
+      if [[ "$committed" == "yes" ]]; then
+        echo "pushed: $summary"
+      else
+        echo "pushed local commits."
+      fi
+      git log --oneline -1
+    else
+      echo "error: local branch is not ahead of $upstream after sync." >&2
+      exit 1
+    fi
     ;;
 
   *)
