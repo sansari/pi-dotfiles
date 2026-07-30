@@ -114,6 +114,11 @@ export default function (pi: ExtensionAPI) {
       const mode: Mode = arg === "push" || arg === "status" ? arg : "pull";
 
       ctx.ui.setStatus("sync-config", `sync-config: running ${mode}…`);
+      if (mode === "pull") {
+        await autoSyncOnStartup(ctx);
+        return;
+      }
+
       const result = await runSync(mode);
       ctx.ui.setStatus("sync-config", "");
 
@@ -123,15 +128,6 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(`sync-config ${mode}:\n${truncate(result.output)}`, "info");
-
-      // If the pull actually brought in new commits (i.e. output isn't just
-      // "already up to date."), reload extensions/skills/prompts/themes so
-      // the update takes effect in this session immediately.
-      if (mode === "pull" && !result.output.startsWith("already up to date")) {
-        ctx.ui.notify("Reloading extensions/skills/prompts/themes…", "info");
-        await ctx.reload();
-        return;
-      }
     },
   });
 }
