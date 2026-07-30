@@ -4,7 +4,7 @@
  * This extension:
  * - Reads and writes todos from/to `TODO.md` (falling back to `todo.md`) in the current working directory
  * - Preserves markdown structure (sections, headings, non-todo lines) on round-trips
- * - Understands the Pi Native-style priority sections: P0/P1/P2/P3
+ * - Understands the Pi Native-style sections: In Progress, Next, Backlog
  * - Completes todos by removing them from the active list
  * - Registers a `todo` tool for the LLM to manage todos
  * - Registers a `/todos` command for users to open the list in the system Markdown app
@@ -39,7 +39,7 @@ const TodoParams = Type.Object({
 	action: StringEnum(["list", "add", "toggle", "clear"] as const),
 	text: Type.Optional(Type.String({ description: "Todo text (for add). Plain text is formatted as `**(feat|bug) Text.**`; already-formatted markdown is preserved." })),
 	id: Type.Optional(Type.Number({ description: "Todo ID (for toggle)" })),
-	priority: Type.Optional(StringEnum(["P0", "P1", "P2", "P3"] as const)),
+	priority: Type.Optional(StringEnum(["in-progress", "next", "backlog", "P0", "P1", "P2", "P3"] as const)),
 	kind: Type.Optional(StringEnum(["feat", "bug"] as const)),
 });
 
@@ -62,7 +62,8 @@ async function findTodosPreviewFile(cwd: string): Promise<string | null> {
 	return null;
 }
 
-type TodoPriority = "P0" | "P1" | "P2" | "P3";
+type TodoPriority = "in-progress" | "next" | "backlog";
+type TodoPriorityInput = TodoPriority | "P0" | "P1" | "P2" | "P3";
 type TodoKind = "feat" | "bug";
 
 function formatTodoText(text: string, kind: TodoKind): string {
@@ -72,12 +73,28 @@ function formatTodoText(text: string, kind: TodoKind): string {
 	return `**(${kind}) ${withPeriod}**`;
 }
 
+function normalizePriority(priority: TodoPriorityInput | undefined): TodoPriority {
+	switch (priority) {
+		case "in-progress":
+		case "next":
+		case "backlog":
+			return priority;
+		case "P0":
+			return "in-progress";
+		case "P1":
+			return "next";
+		case "P2":
+		case "P3":
+		case undefined:
+			return priority === undefined ? "next" : "backlog";
+	}
+}
+
 function sectionTitle(priority: TodoPriority): string {
 	switch (priority) {
-		case "P0": return "## P0: Critical";
-		case "P1": return "## P1: Next";
-		case "P2": return "## P2: Backlog";
-		case "P3": return "## P3: Ideas";
+		case "in-progress": return "## In Progress";
+		case "next": return "## Next";
+		case "backlog": return "## Backlog";
 	}
 }
 
@@ -190,10 +207,10 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		// Append any new todos that aren't in fileBlocks yet to P1: Next.
+		// Append any new todos that aren't in fileBlocks yet to Next.
 		for (const todo of todos) {
 			if (!renderedIds.has(todo.id)) {
-				insertTodoIntoPrioritySection(todo.id, "P1");
+				insertTodoIntoPrioritySection(todo.id, "next");
 				return saveToFile();
 			}
 		}
@@ -216,7 +233,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "todo",
 		label: "Todo",
-		description: "Manage a todo list backed by TODO.md/todo.md. Actions: list, add (text, optional priority P0/P1/P2/P3, optional kind feat/bug), toggle/complete/delete (id), clear",
+		description: "Manage a todo list backed by TODO.md/todo.md. Actions: list, add (text, optional priority in-progress/next/backlog, optional kind feat/bug), toggle/complete/delete (id), clear",
 		parameters: TodoParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -247,8 +264,8 @@ export default function (pi: ExtensionAPI) {
 							details: { action: "add", todos: [...todos], nextId, error: "text required" } as TodoDetails,
 						};
 					}
-					const priority = (params.priority ?? "P1") as TodoPriority;
-					const kind = (params.kind ?? (priority === "P0" ? "bug" : "feat")) as TodoKind;
+					const priority = normalizePriority(params.priority as TodoPriorityInput | undefined);
+					const kind = (params.kind ?? (priority === "in-progress" ? "bug" : "feat")) as TodoKind;
 					const newTodo: Todo = { id: nextId++, text: formatTodoText(params.text, kind) };
 					todos.push(newTodo);
 					insertTodoIntoPrioritySection(newTodo.id, priority);
