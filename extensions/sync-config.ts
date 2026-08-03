@@ -46,7 +46,7 @@ async function dirtySummary(): Promise<string> {
 /// of local uncommitted changes do we offer to push (with confirmation,
 /// always) and then retry the pull. Any other pull failure (no network,
 /// diverged history, ...) is just surfaced — never auto-escalated to a push.
-async function autoSyncOnStartup(ctx: ExtensionContext): Promise<void> {
+async function autoSyncOnStartup(ctx: ExtensionContext, onUpdated?: () => Promise<void>): Promise<void> {
   const STATUS_KEY = "sync-config";
   ctx.ui.setStatus(STATUS_KEY, "Syncing your global pi config…");
 
@@ -56,7 +56,7 @@ async function autoSyncOnStartup(ctx: ExtensionContext): Promise<void> {
     if (pull.ok) {
       if (!pull.output.startsWith("already up to date")) {
         ctx.ui.notify(`Global pi config updated:\n${truncate(pull.output)}`, "info");
-        await ctx.reload();
+        await onUpdated?.();
       }
       return;
     }
@@ -94,7 +94,7 @@ async function autoSyncOnStartup(ctx: ExtensionContext): Promise<void> {
     }
     if (!retryPull.output.startsWith("already up to date")) {
       ctx.ui.notify(`Global pi config updated:\n${truncate(retryPull.output)}`, "info");
-      await ctx.reload();
+      await onUpdated?.();
     }
   } finally {
     ctx.ui.setStatus(STATUS_KEY, "");
@@ -104,7 +104,17 @@ async function autoSyncOnStartup(ctx: ExtensionContext): Promise<void> {
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
     if (event.reason !== "startup") return;
-    await autoSyncOnStartup(ctx);
+    await autoSyncOnStartup(ctx, async () => {
+      pi.sendUserMessage("/sync-config-reload", { deliverAs: "followUp" });
+    });
+  });
+
+  pi.registerCommand("sync-config-reload", {
+    description: "Reload pi after sync-config updates global config",
+    handler: async (_args, ctx) => {
+      await ctx.reload();
+      return;
+    },
   });
 
   pi.registerCommand("sync-config", {
@@ -115,7 +125,9 @@ export default function (pi: ExtensionAPI) {
 
       ctx.ui.setStatus("sync-config", `sync-config: running ${mode}…`);
       if (mode === "pull") {
-        await autoSyncOnStartup(ctx);
+        await autoSyncOnStartup(ctx, async () => {
+          await ctx.reload();
+        });
         return;
       }
 
