@@ -11,7 +11,7 @@ type ChangelogCategory = "Added" | "Changed" | "Fixed" | "Removed";
 
 type GitOutputDetails = {
   title: string;
-  kind: "status" | "diff" | "push" | "error";
+  kind: "status" | "diff" | "pull" | "push" | "error";
 };
 
 async function runGit(cwd: string, args: string[], maxBuffer = 1024 * 1024 * 16): Promise<string> {
@@ -172,6 +172,55 @@ async function handleDiff(pi: ExtensionAPI, args: string, ctx: ExtensionContext)
   sendGitOutput(pi, `git diff${parsedArgs.length ? ` ${parsedArgs.join(" ")}` : ""}`, "diff", diff ? truncate(diff) : "No diff.");
 }
 
+async function handlePull(pi: ExtensionAPI, args: string, ctx: ExtensionContext): Promise<void> {
+  const root = await repoRoot(ctx.cwd);
+  const base = args.trim() || "main";
+  const target = `origin/${base}`;
+
+  ctx.ui.setStatus("git", `Fetching ${target}…`);
+  const fetchOutput = await runGit(root, ["fetch", "origin", base]);
+
+  ctx.ui.setStatus("git", `Rebasing onto ${target}…`);
+  try {
+    const rebaseOutput = await runGit(root, ["rebase", "--autostash", target]);
+    ctx.ui.setStatus("git", "");
+    sendGitOutput(
+      pi,
+      "git pull",
+      "pull",
+      `Fetched ${target} and rebased the current branch.\n\n${truncate([fetchOutput, rebaseOutput].filter(Boolean).join("\n"), 80) || "Already up to date."}`,
+    );
+  } catch (error) {
+    ctx.ui.setStatus("git", "");
+    const message = error instanceof Error ? error.message : String(error);
+    const conflicts = await runGit(root, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "");
+    const rebaseInProgress = await runGit(root, ["rev-parse", "--verify", "REBASE_HEAD"]).then(() => true).catch(() => false);
+
+    if (!rebaseInProgress || !conflicts) {
+      throw error;
+    }
+
+    const conflictList = conflicts.split("\n").filter(Boolean).map((file) => `- ${file}`).join("\n");
+    sendGitOutput(
+      pi,
+      "git pull conflicts",
+      "error",
+      `Rebase onto ${target} stopped with conflicts. Pi has been asked to resolve them.\n\n${truncate(message, 60)}\n\nConflicted files:\n${conflictList}`,
+    );
+    pi.sendUserMessage(
+      [
+        `Resolve the active git rebase conflicts in ${root}.`,
+        "",
+        `The rebase target is ${target}. Conflicted files:`,
+        conflictList,
+        "",
+        "Inspect each conflict, preserve the correct behavior from both sides, run relevant focused checks if practical, then run `git add` on resolved files and continue with `GIT_EDITOR=true git rebase --continue`. If more conflicts appear, repeat until the rebase completes. Do not use `git checkout --ours`, `git checkout --theirs`, or `git rebase --abort` unless I explicitly ask.",
+      ].join("\n"),
+      { deliverAs: "followUp" },
+    );
+  }
+}
+
 async function handlePush(pi: ExtensionAPI, args: string, ctx: ExtensionContext): Promise<void> {
   const root = await repoRoot(ctx.cwd);
   const noChangelog = /(?:^|\s)--no-changelog(?:\s|$)/.test(args);
@@ -215,7 +264,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer("git-output", (message, { outputPad }, theme) => {
     const details = message.details as GitOutputDetails | undefined;
     const title = details?.title ?? "git";
-    const headerColor = details?.kind === "error" ? "error" : details?.kind === "push" ? "success" : "accent";
+    const headerColor = details?.kind === "error" ? "error" : details?.kind === "push" || details?.kind === "pull" ? "success" : "accent";
     const lines = String(message.content ?? "").split("\n");
     const rendered = [theme.fg(headerColor, `▸ ${title}`), ...lines.map((line) => colorGitLine(line, theme))].join("\n");
     const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
@@ -224,7 +273,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("git", {
-    description: "Git helpers: /git status, /git diff [args], /git push [message] [--no-changelog]",
+    description: "Git helpers: /git status, /git diff [args], /git pull [base=main], /git push [message] [--no-changelog]",
     handler: async (args, ctx) => {
       const [subcommand = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       try {
@@ -236,11 +285,14 @@ export default function (pi: ExtensionAPI) {
           case "diff":
             await handleDiff(pi, rest.join(" "), ctx);
             return;
+          case "pull":
+            await handlePull(pi, rest.join(" "), ctx);
+            return;
           case "push":
             await handlePush(pi, rest.join(" "), ctx);
             return;
           default:
-            sendGitOutput(pi, "git", "error", "Usage: /git status | /git diff [args] | /git push [message] [--no-changelog]");
+            sendGitOutput(pi, "git", "error", "Usage: /git status | /git diff [args] | /git pull [base=main] | /git push [message] [--no-changelog]");
         }
       } catch (error) {
         ctx.ui.setStatus("git", "");

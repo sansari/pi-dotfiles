@@ -3,8 +3,8 @@
     "npm:@demigodmode/pi-web-agent"
   ],
   "lastChangelogVersion": "0.83.0",
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.5",
+  "defaultProvider": "openrouter",
+  "defaultModel": "moonshotai/kimi-k3",
   "defaultThinkingLevel": "medium",
   "hideThinkingBlock": false,
   "theme": "dark",
