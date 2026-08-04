@@ -15,6 +15,7 @@ type TodoSections = {
 	inProgress: string[];
 	next: string[];
 	critical: string[];
+	done: string[];
 };
 
 
@@ -79,6 +80,7 @@ const parseTodoSections = (todo: string): TodoSections => {
 		inProgress: sections["In Progress"] ?? [],
 		next: sections["Next"] ?? sections["P1: Next"] ?? [],
 		critical: sections["Backlog"] ?? sections["P0: Critical"] ?? [],
+		done: sections["Recently Done"] ?? sections["Done"] ?? [],
 	};
 };
 
@@ -153,6 +155,7 @@ const stripDecorativeMarkdown = (text: string): string =>
 	text
 		.replace(/^[-*]\s+/, "")
 		.replace(/\*\*/g, "")
+		.replace(/^\d{4}-\d{2}-\d{2}\s+/, "")
 		.replace(/^\((feat|bug)\)\s*/i, "")
 		.trim();
 
@@ -235,7 +238,7 @@ const normalizeDailyMarkdown = (draft: string): string => {
 		.map((line) => {
 			const trimmed = line.trim();
 			if (!trimmed) return "";
-			if (trimmed === "*Done:*" || trimmed === "*In Progress:*" || trimmed === "*Next:*") {
+			if (trimmed === "*Recently Done:*" || trimmed === "*Done:*" || trimmed === "*In Progress:*" || trimmed === "*Next:*") {
 				inBulletSection = true;
 				return trimmed;
 			}
@@ -257,15 +260,19 @@ const buildDaily = async (root: string, options: DailyOptions): Promise<string> 
 	const sections = parseTodoSections(todo);
 	const commits = await summarizeCommits(root, options);
 	const changelog = todayChangelogBullets(root);
-	const done = [...changelog, ...commits.filter((commit) => !changelog.some((entry) => commit.toLowerCase().includes(entry.slice(0, 30).toLowerCase())))]
-		.filter((item) => !isLowSignalChange(item));
+	const todoDone = sections.done;
+	const done = [
+		...todoDone,
+		...changelog.filter((entry) => !todoDone.some((item) => item.toLowerCase().includes(entry.slice(0, 30).toLowerCase()))),
+		...commits.filter((commit) => ![...todoDone, ...changelog].some((entry) => commit.toLowerCase().includes(entry.slice(0, 30).toLowerCase()))),
+	].filter((item) => !isLowSignalChange(item));
 	const inProgress = [...sections.inProgress];
 	const next = sections.next.length > 0 ? sections.next : sections.critical;
 
 	const lines = [
 		"**Pi Native**",
 		"",
-		"*Done:*",
+		"*Recently Done:*",
 		...formatBullets(done, `No committed changes found in the last ${options.since}.`, 8),
 	];
 

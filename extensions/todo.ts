@@ -4,8 +4,8 @@
  * This extension:
  * - Reads and writes todos from/to `TODO.md` (falling back to `todo.md`) in the current working directory
  * - Preserves markdown structure (sections, headings, non-todo lines) on round-trips
- * - Understands the Pi Native-style sections: In Progress, Next, Backlog
- * - Completes todos by removing them from the active list
+ * - Understands the Pi Native-style sections: In Progress, Next, Backlog, Recently Done
+ * - Completes todos by moving them to a capped Recently Done history
  * - Registers a `todo` tool for the LLM to manage todos
  * - Registers a `/todos` command for users to format, add, start, status-check, finish, or open the list
  */
@@ -20,6 +20,14 @@ import { promisify } from "node:util";
 import { Type } from "typebox";
 
 const execFileAsync = promisify(execFile);
+const doneSectionTitle = "## Recently Done";
+const legacyDoneSectionTitle = "## Done";
+const maxDoneItems = 20;
+
+function isDoneSectionHeading(line: string): boolean {
+	const trimmed = line.trim();
+	return trimmed === doneSectionTitle || trimmed === legacyDoneSectionTitle;
+}
 
 interface Todo {
 	id: number;
@@ -165,13 +173,63 @@ function normalizeTodoText(text: string, kind?: TodoKind): string {
 		return `${legacyKindMatch[1].toLowerCase()}: ${legacyKindMatch[2].trim()}`;
 	}
 
-	const prefixedMatch = trimmed.match(/^(feat|bug)\s*:\s*(.+)$/i);
+	const prefixedMatch = trimmed.match(/^(feat|bug|chore)\s*:\s*(.+)$/i);
 	if (prefixedMatch) {
 		return `${prefixedMatch[1].toLowerCase()}: ${prefixedMatch[2].trim()}`;
 	}
 
 	if (kind) return `${kind}: ${trimmed}`;
 	return trimmed;
+}
+
+function normalizeDoneText(text: string): string {
+	const trimmed = text.trim();
+	const dated = trimmed.match(/^(\d{4}-\d{2}-\d{2})\s+(.+)$/);
+	if (dated) return `${dated[1]} ${normalizeTodoText(dated[2])}`;
+	return normalizeTodoText(trimmed);
+}
+
+function normalizeDoneSection(content: string): string {
+	const lines = content.split("\n");
+	const headingIndex = lines.findIndex(isDoneSectionHeading);
+	if (headingIndex === -1) return content;
+
+	let endIndex = headingIndex + 1;
+	while (endIndex < lines.length && !/^##\s+/.test(lines[endIndex].trim())) endIndex++;
+
+	const doneItems = lines
+		.slice(headingIndex + 1, endIndex)
+		.map((line) => parseTodoLine(line.trim()))
+		.filter((item): item is { text: string; checked: boolean } => Boolean(item))
+		.map((item) => normalizeDoneText(item.text))
+		.filter(Boolean)
+		.slice(0, maxDoneItems);
+
+	const rendered = [doneSectionTitle];
+	if (doneItems.length > 0) {
+		rendered.push("", ...doneItems.map((item, index) => `${index + 1}. ${item}`));
+	}
+
+	return [...lines.slice(0, headingIndex), ...rendered, ...lines.slice(endIndex)].join("\n");
+}
+
+async function addDoneItemToFile(filePath: string, todoText: string): Promise<void> {
+	const today = new Date().toLocaleDateString("en-CA");
+	const entry = `${today} ${normalizeTodoText(todoText)}`;
+	let content = await fs.readFile(filePath, "utf-8").catch(() => "");
+	const lines = content.split("\n");
+	let headingIndex = lines.findIndex(isDoneSectionHeading);
+
+	if (headingIndex === -1) {
+		content = `${content.replace(/\s*$/g, "")}\n\n${doneSectionTitle}\n\n1. ${entry}\n`;
+		await fs.writeFile(filePath, normalizeDoneSection(content), "utf-8");
+		return;
+	}
+
+	let insertIndex = headingIndex + 1;
+	while (insertIndex < lines.length && lines[insertIndex].trim() === "") insertIndex++;
+	lines.splice(insertIndex, 0, `1. ${entry}`);
+	await fs.writeFile(filePath, normalizeDoneSection(lines.join("\n")), "utf-8");
 }
 
 function parseTodoLine(line: string): { text: string; checked: boolean } | null {
@@ -340,7 +398,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		await fs.writeFile(todosFilePath, lines.join("\n"), "utf-8");
+		await fs.writeFile(todosFilePath, normalizeDoneSection(lines.join("\n")), "utf-8");
 	}
 
 	async function reloadAndSave(): Promise<void> {
@@ -564,12 +622,12 @@ export default function (pi: ExtensionAPI) {
 						ctx.ui.notify([
 							"/todos — open TODO.md",
 							"/todos help — show this help",
-							"/todos format — rewrite todos as numbered lists using feat:/bug: prefixes when present",
+							"/todos format — rewrite todos as numbered lists, normalize prefixes, and cap Done history",
 							"/todos next TEXT — add TEXT to the top of Next",
 							"/todos backlog TEXT — add TEXT to the top of Backlog",
 							"/todos start N — move item N from Next to In Progress, then ask the agent to review and propose an implementation plan",
 							"/todos status N — ask the agent for status on item N in In Progress; completed items should be removed",
-							"/todos finish N — remove item N from In Progress, format TODO.md, update changelog when present, then commit and push",
+							"/todos finish N — move item N from In Progress to Done, format TODO.md, update changelog when present, then commit and push",
 						].join("\n"), "info");
 						return;
 					}
@@ -626,6 +684,7 @@ export default function (pi: ExtensionAPI) {
 						}
 						removeTodo(todo);
 						await saveToFile();
+						if (todosFilePath) await addDoneItemToFile(todosFilePath, todo.text);
 						await reloadAndSave();
 						const gitResult = await commitAndPushFinishedTodo(ctx.cwd, todo.text);
 						ctx.ui.notify(`Finished: ${todo.text}\n${gitResult}`, "success");
