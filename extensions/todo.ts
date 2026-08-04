@@ -85,7 +85,7 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
 }
 
 function truncateForCommit(text: string): string {
-	const clean = normalizeTodoText(text)
+	const clean = todoSummary(text)
 		.replace(/[`*_#>\[\]()]/g, "")
 		.replace(/\s+/g, " ")
 		.trim();
@@ -93,14 +93,14 @@ function truncateForCommit(text: string): string {
 }
 
 function changelogCategoryForTodo(text: string): "Added" | "Changed" | "Fixed" {
-	const normalized = normalizeTodoText(text).toLowerCase();
+	const normalized = todoSummary(text).toLowerCase();
 	if (normalized.startsWith("bug:")) return "Fixed";
 	if (normalized.startsWith("feat:")) return "Changed";
 	return "Changed";
 }
 
 function changelogDescriptionForTodo(text: string): string {
-	return `Completed TODO: ${normalizeTodoText(text).replace(/^(feat|bug):\s*/i, "")}`;
+	return `Completed TODO: ${todoSummary(text).replace(/^(feat|bug):\s*/i, "")}`;
 }
 
 async function addChangelogEntryIfPresent(repoRoot: string, todoText: string): Promise<void> {
@@ -163,7 +163,7 @@ type TodoPriority = "in-progress" | "next" | "backlog";
 type TodoPriorityInput = TodoPriority | "P0" | "P1" | "P2" | "P3";
 type TodoKind = "feat" | "bug";
 
-function normalizeTodoText(text: string, kind?: TodoKind): string {
+function normalizeTodoSummary(text: string, kind?: TodoKind): string {
 	let trimmed = text.trim();
 	const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
 	if (boldMatch) trimmed = boldMatch[1].trim();
@@ -182,6 +182,30 @@ function normalizeTodoText(text: string, kind?: TodoKind): string {
 	return trimmed;
 }
 
+function normalizeTodoText(text: string, kind?: TodoKind): string {
+	const lines = text.replace(/\r\n/g, "\n").split("\n");
+	const firstLineIndex = lines.findIndex((line) => line.trim() !== "");
+	if (firstLineIndex === -1) return "";
+
+	const summary = normalizeTodoSummary(lines[firstLineIndex], kind);
+	const details = lines.slice(firstLineIndex + 1).join("\n").replace(/\s+$/g, "");
+	return details ? `${summary}\n${details}` : summary;
+}
+
+function todoSummary(text: string): string {
+	return normalizeTodoText(text).split("\n")[0] ?? "";
+}
+
+function todoDetailLines(text: string): string[] {
+	return normalizeTodoText(text).split("\n").slice(1).map((line) => {
+		if (line.trim() === "") return line;
+		// Keep child bullets nested under rendered numbered parent tasks.
+		// CommonMark needs at least three spaces after `1. ` parents.
+		if (/^\s*[-*+]\s+/.test(line)) return `   ${line.trim()}`;
+		return /^\s{3,}/.test(line) ? line : `   ${line.trim()}`;
+	});
+}
+
 function normalizeDoneText(text: string): string {
 	const trimmed = text.trim();
 	const dated = trimmed.match(/^(\d{4}-\d{2}-\d{2})\s+(.+)$/);
@@ -197,17 +221,28 @@ function normalizeDoneSection(content: string): string {
 	let endIndex = headingIndex + 1;
 	while (endIndex < lines.length && !/^##\s+/.test(lines[endIndex].trim())) endIndex++;
 
-	const doneItems = lines
-		.slice(headingIndex + 1, endIndex)
-		.map((line) => parseTodoLine(line.trim()))
-		.filter((item): item is { text: string; checked: boolean } => Boolean(item))
-		.map((item) => normalizeDoneText(item.text))
-		.filter(Boolean)
-		.slice(0, maxDoneItems);
+	const doneItems: string[] = [];
+	for (let index = headingIndex + 1; index < endIndex; index++) {
+		const parsed = parseTodoLine(lines[index]);
+		if (!parsed) continue;
+
+		const detailLines: string[] = [];
+		let lookahead = index + 1;
+		while (lookahead < endIndex && isIndentedTodoDetailLine(lines[lookahead])) {
+			detailLines.push(lines[lookahead]);
+			lookahead++;
+		}
+		index = lookahead - 1;
+		doneItems.push([normalizeDoneText(parsed.text), ...detailLines].join("\n"));
+		if (doneItems.length >= maxDoneItems) break;
+	}
 
 	const rendered = [doneSectionTitle];
 	if (doneItems.length > 0) {
-		rendered.push("", ...doneItems.map((item, index) => `${index + 1}. ${item}`));
+		rendered.push("", ...doneItems.flatMap((item, index) => {
+			const [summary, ...details] = item.split("\n");
+			return [`${index + 1}. ${summary}`, ...details];
+		}));
 	}
 
 	return [...lines.slice(0, headingIndex), ...rendered, ...lines.slice(endIndex)].join("\n");
@@ -233,16 +268,20 @@ async function addDoneItemToFile(filePath: string, todoText: string): Promise<vo
 }
 
 function parseTodoLine(line: string): { text: string; checked: boolean } | null {
-	let match = line.match(/^\s*- \[([ xX])\]\s+(.+)$/);
+	let match = line.match(/^- \[([ xX])\]\s+(.+)$/);
 	if (match) return { checked: match[1].toLowerCase() === "x", text: match[2] };
 
-	match = line.match(/^\s*\d+\.\s+(.+)$/);
+	match = line.match(/^\d+\.\s+(.+)$/);
 	if (match) return { checked: false, text: match[1] };
 
-	match = line.match(/^\s*-\s+(.+)$/);
+	match = line.match(/^[-*]\s+(.+)$/);
 	if (match) return { checked: false, text: match[1] };
 
 	return null;
+}
+
+function isIndentedTodoDetailLine(line: string): boolean {
+	return /^\s+\S/.test(line) && !/^##\s+/.test(line.trim());
 }
 
 function normalizePriority(priority: TodoPriorityInput | undefined): TodoPriority {
@@ -306,7 +345,8 @@ export default function (pi: ExtensionAPI) {
 		let id = 1;
 
 		let currentPriority: TodoPriority | null = null;
-		for (const line of lines) {
+		for (let index = 0; index < lines.length; index++) {
+			const line = lines[index];
 			const trimmed = line.trim();
 			if (trimmed === sectionTitle("in-progress")) currentPriority = "in-progress";
 			else if (trimmed === sectionTitle("next")) currentPriority = "next";
@@ -315,8 +355,17 @@ export default function (pi: ExtensionAPI) {
 
 			const parsed = currentPriority ? parseTodoLine(line) : null;
 			if (parsed) {
+				const detailLines: string[] = [];
+				let lookahead = index + 1;
+				while (lookahead < lines.length && isIndentedTodoDetailLine(lines[lookahead])) {
+					detailLines.push(lines[lookahead]);
+					lookahead++;
+				}
+				index = lookahead - 1;
+
 				if (!parsed.checked) {
-					todos.push({ id, text: normalizeTodoText(parsed.text), priority: currentPriority });
+					const body = [parsed.text, ...detailLines].join("\n");
+					todos.push({ id, text: normalizeTodoText(body), priority: currentPriority });
 					fileBlocks.push({ type: "todo", id });
 					id++;
 				}
@@ -383,7 +432,8 @@ export default function (pi: ExtensionAPI) {
 				if (todo) {
 					const priority = currentPriority ?? todo.priority;
 					sectionCounts[priority]++;
-					lines.push(`${sectionCounts[priority]}. ${normalizeTodoText(todo.text)}`);
+					lines.push(`${sectionCounts[priority]}. ${todoSummary(todo.text)}`);
+					lines.push(...todoDetailLines(todo.text));
 					renderedIds.add(todo.id);
 				}
 				// Cleared/completed todos: omit their active block entirely
