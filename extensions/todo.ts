@@ -7,7 +7,7 @@
  * - Understands the Pi Native-style sections: In Progress, Next, Backlog
  * - Completes todos by removing them from the active list
  * - Registers a `todo` tool for the LLM to manage todos
- * - Registers a `/todos` command for users to open the list in the system Markdown app
+ * - Registers a `/todos` command for users to format, add, start, status-check, finish, or open the list
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -21,6 +21,7 @@ import { Type } from "typebox";
 interface Todo {
 	id: number;
 	text: string;
+	priority: TodoPriority;
 }
 
 interface TodoDetails {
@@ -37,7 +38,7 @@ type FileBlock =
 
 const TodoParams = Type.Object({
 	action: StringEnum(["list", "add", "toggle", "clear"] as const),
-	text: Type.Optional(Type.String({ description: "Todo text (for add). Plain text is formatted as `**(feat|bug) Text.**`; already-formatted markdown is preserved." })),
+	text: Type.Optional(Type.String({ description: "Todo text (for add). Use `feat: ...` or `bug: ...` when applicable; unprefixed text is preserved." })),
 	id: Type.Optional(Type.Number({ description: "Todo ID (for toggle)" })),
 	priority: Type.Optional(StringEnum(["in-progress", "next", "backlog", "P0", "P1", "P2", "P3"] as const)),
 	kind: Type.Optional(StringEnum(["feat", "bug"] as const)),
@@ -66,11 +67,36 @@ type TodoPriority = "in-progress" | "next" | "backlog";
 type TodoPriorityInput = TodoPriority | "P0" | "P1" | "P2" | "P3";
 type TodoKind = "feat" | "bug";
 
-function formatTodoText(text: string, kind: TodoKind): string {
-	const trimmed = text.trim();
-	if (trimmed.startsWith("**(")) return trimmed;
-	const withPeriod = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
-	return `**(${kind}) ${withPeriod}**`;
+function normalizeTodoText(text: string, kind?: TodoKind): string {
+	let trimmed = text.trim();
+	const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+	if (boldMatch) trimmed = boldMatch[1].trim();
+
+	const legacyKindMatch = trimmed.match(/^\((feat|bug)\)\s+(.+)$/i);
+	if (legacyKindMatch) {
+		return `${legacyKindMatch[1].toLowerCase()}: ${legacyKindMatch[2].trim()}`;
+	}
+
+	const prefixedMatch = trimmed.match(/^(feat|bug)\s*:\s*(.+)$/i);
+	if (prefixedMatch) {
+		return `${prefixedMatch[1].toLowerCase()}: ${prefixedMatch[2].trim()}`;
+	}
+
+	if (kind) return `${kind}: ${trimmed}`;
+	return trimmed;
+}
+
+function parseTodoLine(line: string): { text: string; checked: boolean } | null {
+	let match = line.match(/^\s*- \[([ xX])\]\s+(.+)$/);
+	if (match) return { checked: match[1].toLowerCase() === "x", text: match[2] };
+
+	match = line.match(/^\s*\d+\.\s+(.+)$/);
+	if (match) return { checked: false, text: match[1] };
+
+	match = line.match(/^\s*-\s+(.+)$/);
+	if (match) return { checked: false, text: match[1] };
+
+	return null;
 }
 
 function normalizePriority(priority: TodoPriorityInput | undefined): TodoPriority {
@@ -133,12 +159,18 @@ export default function (pi: ExtensionAPI) {
 		const lines = content.split("\n");
 		let id = 1;
 
+		let currentPriority: TodoPriority | null = null;
 		for (const line of lines) {
-			const match = line.match(/^- \[([ x])\] (.+)$/);
-			if (match) {
-				const text = match[2];
-				if (match[1] !== "x") {
-					todos.push({ id, text });
+			const trimmed = line.trim();
+			if (trimmed === sectionTitle("in-progress")) currentPriority = "in-progress";
+			else if (trimmed === sectionTitle("next")) currentPriority = "next";
+			else if (trimmed === sectionTitle("backlog")) currentPriority = "backlog";
+			else if (trimmed.startsWith("## ")) currentPriority = null;
+
+			const parsed = currentPriority ? parseTodoLine(line) : null;
+			if (parsed) {
+				if (!parsed.checked) {
+					todos.push({ id, text: normalizeTodoText(parsed.text), priority: currentPriority });
 					fileBlocks.push({ type: "todo", id });
 					id++;
 				}
@@ -167,19 +199,15 @@ export default function (pi: ExtensionAPI) {
 		let insertIdx = headingIdx + 1;
 		while (insertIdx < fileBlocks.length) {
 			const block = fileBlocks[insertIdx];
-			if (block.type === "text" && block.content.startsWith("## ")) break;
-			insertIdx++;
+			if (block.type === "text" && block.content.trim() === "") {
+				insertIdx++;
+				continue;
+			}
+			break;
 		}
 
-		// Insert at the end of the chosen section, before the next section header.
-		// If the section ends with a blank spacer, insert before that spacer so
-		// the Markdown remains visually tidy.
-		if (insertIdx > headingIdx + 1) {
-			const previous = fileBlocks[insertIdx - 1];
-			if (previous?.type === "text" && previous.content.trim() === "") {
-				insertIdx--;
-			}
-		}
+		// Insert at the top of the chosen section, after the heading and optional
+		// spacer, so /todos next and /todos backlog behave like a current queue.
 		fileBlocks.splice(insertIdx, 0, { type: "todo", id: todoID });
 	}
 
@@ -193,29 +221,63 @@ export default function (pi: ExtensionAPI) {
 		const todoMap = new Map(todos.map((t) => [t.id, t]));
 		const renderedIds = new Set<number>();
 		const lines: string[] = [];
+		const sectionCounts: Record<TodoPriority, number> = { "in-progress": 0, next: 0, backlog: 0 };
+		let currentPriority: TodoPriority | null = null;
 
 		for (const block of fileBlocks) {
 			if (block.type === "text") {
+				const trimmed = block.content.trim();
+				if (trimmed === sectionTitle("in-progress")) currentPriority = "in-progress";
+				else if (trimmed === sectionTitle("next")) currentPriority = "next";
+				else if (trimmed === sectionTitle("backlog")) currentPriority = "backlog";
+				else if (trimmed.startsWith("## ")) currentPriority = null;
 				lines.push(block.content);
 			} else {
 				const todo = todoMap.get(block.id);
 				if (todo) {
-					lines.push(`- [ ] ${todo.text}`);
+					const priority = currentPriority ?? todo.priority;
+					sectionCounts[priority]++;
+					lines.push(`${sectionCounts[priority]}. ${normalizeTodoText(todo.text)}`);
 					renderedIds.add(todo.id);
 				}
 				// Cleared/completed todos: omit their active block entirely
 			}
 		}
 
-		// Append any new todos that aren't in fileBlocks yet to Next.
+		// Append any new todos that aren't in fileBlocks yet to their selected section.
 		for (const todo of todos) {
 			if (!renderedIds.has(todo.id)) {
-				insertTodoIntoPrioritySection(todo.id, "next");
+				insertTodoIntoPrioritySection(todo.id, todo.priority);
 				return saveToFile();
 			}
 		}
 
 		await fs.writeFile(todosFilePath, lines.join("\n"), "utf-8");
+	}
+
+	async function reloadAndSave(): Promise<void> {
+		await loadFromFile();
+		await saveToFile();
+	}
+
+	function todosInPriority(priority: TodoPriority): Todo[] {
+		return todos.filter((todo) => todo.priority === priority);
+	}
+
+	function todoBySectionNumber(priority: TodoPriority, number: number): Todo | undefined {
+		return todosInPriority(priority)[number - 1];
+	}
+
+	function removeTodo(todo: Todo): void {
+		fileBlocks = fileBlocks.filter((block) => block.type !== "todo" || block.id !== todo.id);
+		todos = todos.filter((t) => t.id !== todo.id);
+	}
+
+	function moveTodoToPriority(todo: Todo, priority: TodoPriority): void {
+		removeTodo(todo);
+		todo.priority = priority;
+		todos.push(todo);
+		insertTodoIntoPrioritySection(todo.id, priority);
 	}
 
 	// Load from file on session start / tree navigation
@@ -233,7 +295,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "todo",
 		label: "Todo",
-		description: "Manage a todo list backed by TODO.md/todo.md. Actions: list, add (text, optional priority in-progress/next/backlog, optional kind feat/bug), toggle/complete/delete (id), clear",
+		description: "Manage a todo list backed by TODO.md/todo.md. Actions: list, add (text, optional priority in-progress/next/backlog, optional kind feat/bug), toggle/complete/delete (id), clear. Todos are rendered as numbered list entries; text may use feat: or bug: prefixes.",
 		parameters: TodoParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -265,13 +327,12 @@ export default function (pi: ExtensionAPI) {
 						};
 					}
 					const priority = normalizePriority(params.priority as TodoPriorityInput | undefined);
-					const kind = (params.kind ?? (priority === "in-progress" ? "bug" : "feat")) as TodoKind;
-					const newTodo: Todo = { id: nextId++, text: formatTodoText(params.text, kind) };
+					const newTodo: Todo = { id: nextId++, text: normalizeTodoText(params.text, params.kind as TodoKind | undefined), priority };
 					todos.push(newTodo);
 					insertTodoIntoPrioritySection(newTodo.id, priority);
 					await saveToFile();
 					return {
-						content: [{ type: "text", text: `Added ${priority} ${kind} todo #${newTodo.id}: ${newTodo.text}` }],
+						content: [{ type: "text", text: `Added ${priority} todo #${newTodo.id}: ${newTodo.text}` }],
 						details: { action: "add", todos: [...todos], nextId } as TodoDetails,
 					};
 				}
@@ -295,8 +356,7 @@ export default function (pi: ExtensionAPI) {
 							} as TodoDetails,
 						};
 					}
-					fileBlocks = fileBlocks.filter((block) => block.type !== "todo" || block.id !== todo.id);
-					todos = todos.filter((t) => t.id !== todo.id);
+					removeTodo(todo);
 					await saveToFile();
 					return {
 						content: [{ type: "text", text: `Completed and removed todo #${todo.id}: ${todo.text}` }],
@@ -392,17 +452,115 @@ export default function (pi: ExtensionAPI) {
 
 	// Register the /todos command for users
 	pi.registerCommand("todos", {
-		description: "Open TODO.md (or todo.md) in the system default Markdown app",
-		handler: async (_args, ctx) => {
-			const todoMarkdownPath = await findTodosPreviewFile(ctx.cwd);
-			if (!todoMarkdownPath) {
-				ctx.ui.notify("No TODO.md or todo.md found in this project.", "warning");
-				return;
-			}
+		description: "Manage TODO.md: /todos help, format, start N, status N, finish N, next TEXT, backlog TEXT, or bare /todos to open the file",
+		handler: async (args, ctx) => {
+			await ensureTodosFilePath(ctx.cwd);
+			await loadFromFile();
+
+			const [rawSubcommand, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			const subcommand = rawSubcommand?.toLowerCase();
 
 			try {
-				openFile(todoMarkdownPath);
-				ctx.ui.notify(`Opened ${todoMarkdownPath}`, "info");
+				switch (subcommand) {
+					case undefined: {
+						if (!todosFilePath) {
+							ctx.ui.notify("No TODO.md or todo.md found in this project.", "warning");
+							return;
+						}
+						openFile(todosFilePath);
+						ctx.ui.notify(`Opened ${todosFilePath}`, "info");
+						return;
+					}
+
+					case "help": {
+						ctx.ui.notify([
+							"/todos — open TODO.md",
+							"/todos help — show this help",
+							"/todos format — rewrite todos as numbered lists using feat:/bug: prefixes when present",
+							"/todos next TEXT — add TEXT to the top of Next",
+							"/todos backlog TEXT — add TEXT to the top of Backlog",
+							"/todos start N — move item N from Next to In Progress",
+							"/todos status N — ask the agent for status on item N in In Progress; completed items should be removed",
+							"/todos finish N — remove item N from In Progress",
+						].join("\n"), "info");
+						return;
+					}
+
+					case "format": {
+						await reloadAndSave();
+						ctx.ui.notify(`Formatted ${todosFilePath}`, "success");
+						return;
+					}
+
+					case "start": {
+						const number = Number(rest[0]);
+						if (!Number.isInteger(number) || number < 1) {
+							ctx.ui.notify("Usage: /todos start 3", "warning");
+							return;
+						}
+						const todo = todoBySectionNumber("next", number);
+						if (!todo) {
+							ctx.ui.notify(`No Next todo #${number}`, "warning");
+							return;
+						}
+						moveTodoToPriority(todo, "in-progress");
+						await saveToFile();
+						ctx.ui.notify(`Started: ${todo.text}`, "success");
+						return;
+					}
+
+					case "status": {
+						const number = Number(rest[0]);
+						if (!Number.isInteger(number) || number < 1) {
+							ctx.ui.notify("Usage: /todos status 3", "warning");
+							return;
+						}
+						const todo = todoBySectionNumber("in-progress", number);
+						if (!todo) {
+							ctx.ui.notify(`No In Progress todo #${number}`, "warning");
+							return;
+						}
+						pi.sendUserMessage(`Check the status of In Progress todo #${number}: ${todo.text}\n\nInspect the current project state yourself. If this todo is complete, remove it from In Progress by using the todo tool or editing TODO.md, then say it is done. If it is not complete, give a concise status summary and the next concrete steps. Do not implement the todo unless I explicitly ask you to; this is a status check only.`);
+						return;
+					}
+
+					case "finish": {
+						const number = Number(rest[0]);
+						if (!Number.isInteger(number) || number < 1) {
+							ctx.ui.notify("Usage: /todos finish 2", "warning");
+							return;
+						}
+						const todo = todoBySectionNumber("in-progress", number);
+						if (!todo) {
+							ctx.ui.notify(`No In Progress todo #${number}`, "warning");
+							return;
+						}
+						removeTodo(todo);
+						await saveToFile();
+						ctx.ui.notify(`Finished: ${todo.text}`, "success");
+						return;
+					}
+
+					case "next":
+					case "backlog": {
+						const text = args.trim().slice(subcommand.length).trim();
+						if (!text) {
+							ctx.ui.notify(`Usage: /todos ${subcommand} todo text`, "warning");
+							return;
+						}
+						const priority = subcommand as TodoPriority;
+						const newTodo: Todo = { id: nextId++, text: normalizeTodoText(text), priority };
+						todos.push(newTodo);
+						insertTodoIntoPrioritySection(newTodo.id, priority);
+						await saveToFile();
+						ctx.ui.notify(`Added to ${priority === "next" ? "Next" : "Backlog"}: ${newTodo.text}`, "success");
+						return;
+					}
+
+					default:
+						ctx.ui.notify("Usage: /todos help | format | start N | status N | finish N | next TEXT | backlog TEXT", "warning");
+						return;
+				}
 			} catch (error) {
 				ctx.ui.notify(`/todos failed: ${(error as Error).message}`, "error");
 			}

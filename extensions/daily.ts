@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { execFile, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ const execFileAsync = promisify(execFile);
 
 type CommandResult = { stdout: string; stderr: string };
 type DailyOptions = { since: string; copy: boolean };
+type DailyUpdateEntry = { draft: string; copied: boolean; timestamp: number };
 
 type TodoSections = {
 	inProgress: string[];
@@ -45,8 +47,11 @@ const parseOptions = (args: string): DailyOptions => {
 const stripMarkdownTask = (line: string): string => {
 	return line
 		.replace(/^[-*]\s+\[[ xX]\]\s+/, "")
+		.replace(/^\d+\.\s+/, "")
 		.replace(/^[-*]\s+/, "")
 		.replace(/^\*\*\((feat|bug)\)\s*/i, "**")
+		.replace(/^\*\*((feat|bug):\s*)/i, "$1")
+		.replace(/\*\*$/g, "")
 		.replace(/\s+/g, " ")
 		.trim();
 };
@@ -61,7 +66,7 @@ const parseTodoSections = (todo: string): TodoSections => {
 			sections[current] = sections[current] ?? [];
 			continue;
 		}
-		if (/^[-*]\s+\[[ xX]\]/.test(line.trim())) {
+		if (/^(?:[-*]\s+\[[ xX]\]|\d+\.|[-*]\s+)/.test(line.trim())) {
 			sections[current] = sections[current] ?? [];
 			sections[current].push(stripMarkdownTask(line.trim()));
 		}
@@ -277,6 +282,12 @@ const buildDaily = async (root: string, options: DailyOptions): Promise<string> 
 };
 
 export default function dailyExtension(pi: ExtensionAPI) {
+	pi.registerEntryRenderer<DailyUpdateEntry>("daily-update", (entry, _context, theme) => {
+		const data = entry.data ?? { draft: "", copied: false, timestamp: Date.now() };
+		const header = `${theme.fg("accent", "Daily update")} ${theme.fg("dim", data.copied ? "copied to clipboard" : "not copied")}`;
+		return new Text(`${header}\n\n${data.draft}`, 0, 0);
+	});
+
 	pi.registerCommand("daily", {
 		description: "Draft a Slack-ready Pi Native daily update from git, changelog, and TODO.md",
 		getArgumentCompletions: (prefix) => {
@@ -294,6 +305,11 @@ export default function dailyExtension(pi: ExtensionAPI) {
 					await copyToClipboard(draft);
 					ctx.ui.notify("Daily update copied to clipboard with Slack formatting", "info");
 				}
+				pi.appendEntry<DailyUpdateEntry>("daily-update", {
+					draft,
+					copied: options.copy,
+					timestamp: Date.now(),
+				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Daily update failed: ${message}`, "error");
