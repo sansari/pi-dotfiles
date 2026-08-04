@@ -306,7 +306,7 @@ const normalizeDailyMarkdown = (draft: string): string => {
 				inBulletSection = true;
 				return trimmed;
 			}
-			if (trimmed === "**Pi Native**" || /^#{1,6}\s+/.test(trimmed)) {
+			if (trimmed === "**PiNative**" || trimmed === "**Pi Native**" || /^#{1,6}\s+/.test(trimmed)) {
 				inBulletSection = false;
 				return trimmed;
 			}
@@ -332,7 +332,7 @@ const buildDaily = async (root: string, options: DailyOptions): Promise<string> 
 	const next = sections.next.length > 0 ? sections.next : sections.critical;
 
 	const lines = [
-		"**Pi Native**",
+		"**PiNative**",
 		"",
 		"*Done:*",
 		...formatBullets(done, `No committed changes found in the last ${options.since}.`, 8),
@@ -360,7 +360,7 @@ export default function dailyExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("daily", {
-		description: "Draft a Slack-ready Pi Native daily update from git, changelog, and TODO.md",
+		description: "Draft a Slack-ready PiNative daily update from git, changelog, and TODO.md",
 		getArgumentCompletions: (prefix) => {
 			const options = ["--copy", "--no-copy", "24 hours ago", "today 00:00", "yesterday"];
 			const matches = options.filter((option) => option.startsWith(prefix));

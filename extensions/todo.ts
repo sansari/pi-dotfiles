@@ -4,7 +4,7 @@
  * This extension:
  * - Reads and writes todos from/to `TODO.md` (falling back to `todo.md`) in the current working directory
  * - Preserves markdown structure (sections, headings, non-todo lines) on round-trips
- * - Understands the Pi Native-style sections: In Progress, Next, Backlog, Recently Done
+ * - Understands the PiNative-style sections: In Progress, Next, Backlog, Recently Done
  * - Completes todos by moving them to a capped Recently Done history
  * - Registers a `todo` tool for the LLM to manage todos
  * - Registers a `/todos` command for users to format, add, start, status-check, finish, or open the list
