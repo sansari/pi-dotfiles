@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -7,6 +8,11 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 type ChangelogCategory = "Added" | "Changed" | "Fixed" | "Removed";
+
+type GitOutputDetails = {
+  title: string;
+  kind: "status" | "diff" | "push" | "error";
+};
 
 async function runGit(cwd: string, args: string[], maxBuffer = 1024 * 1024 * 16): Promise<string> {
   try {
@@ -23,22 +29,10 @@ async function repoRoot(cwd: string): Promise<string> {
   return runGit(cwd, ["rev-parse", "--show-toplevel"]);
 }
 
-function truncate(text: string, maxLines = 80): string {
+function truncate(text: string, maxLines = 240): string {
   const lines = text.split("\n");
   if (lines.length <= maxLines) return text;
   return [...lines.slice(0, maxLines), `… (${lines.length - maxLines} more lines)`].join("\n");
-}
-
-function firstSentence(text: string): string {
-  return text.replace(/\s+/g, " ").trim().replace(/[.!?]+$/, "");
-}
-
-function commitSubject(category: ChangelogCategory | undefined, description: string | undefined, fallback: string): string {
-  const clean = firstSentence(description || fallback || "Update project");
-  const verb = category === "Fixed" ? "Fix" : category === "Removed" ? "Remove" : category === "Added" ? "Add" : "Update";
-  const withoutPrefix = clean.replace(/^(add|added|update|updated|change|changed|fix|fixed|remove|removed)\s+/i, "");
-  const subject = `${verb} ${withoutPrefix}`.trim();
-  return subject.length <= 72 ? subject : `${subject.slice(0, 69).trim()}...`;
 }
 
 function changedFilesFromStatus(status: string): string[] {
@@ -54,11 +48,45 @@ function hasChangelogChange(status: string): boolean {
   return changedFilesFromStatus(status).some((file) => file === "CHANGELOG.md" || file.endsWith("/CHANGELOG.md"));
 }
 
+function inferCategory(status: string): ChangelogCategory {
+  const lines = status.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length > 0 && lines.every((line) => /^D\s|^ D/.test(line))) return "Removed";
+  if (lines.some((line) => /^A\s|^\?\?/.test(line))) return "Added";
+  if (lines.some((line) => /^D\s|^ D/.test(line))) return "Removed";
+  return "Changed";
+}
+
+function humanizePath(file: string): string {
+  return file
+    .replace(/^.*\//, "")
+    .replace(/\.[^.]+$/, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function inferDescription(status: string): string {
+  const files = changedFilesFromStatus(status).filter((file) => file !== "CHANGELOG.md");
+  if (files.length === 0) return "Updated project files.";
+  if (files.length === 1) return `Updated ${files[0]}.`;
+
+  const topLevel = new Set(files.map((file) => file.split("/")[0]));
+  if (topLevel.size === 1) return `Updated ${[...topLevel][0]} files.`;
+
+  const named = files.slice(0, 3).map(humanizePath).join(", ");
+  return files.length > 3 ? `Updated ${named}, and related files.` : `Updated ${named}.`;
+}
+
+function commitSubject(category: ChangelogCategory, description: string): string {
+  const verb = category === "Fixed" ? "Fix" : category === "Removed" ? "Remove" : category === "Added" ? "Add" : "Update";
+  const clean = description.replace(/\s+/g, " ").trim().replace(/[.!?]+$/, "");
+  const withoutPrefix = clean.replace(/^(add|added|update|updated|change|changed|fix|fixed|remove|removed)\s+/i, "");
+  const subject = `${verb} ${withoutPrefix}`.trim();
+  return subject.length <= 72 ? subject : `${subject.slice(0, 69).trim()}...`;
+}
+
 function addChangelogEntry(root: string, category: ChangelogCategory, description: string): void {
   const changelogPath = join(root, "CHANGELOG.md");
-  if (!existsSync(changelogPath)) {
-    throw new Error("CHANGELOG.md not found. Add one or run `/git push --no-changelog` if this repo intentionally has no changelog.");
-  }
+  if (!existsSync(changelogPath)) return;
 
   const content = readFileSync(changelogPath, "utf-8");
   const lines = content.split("\n");
@@ -99,15 +127,7 @@ function addChangelogEntry(root: string, category: ChangelogCategory, descriptio
 
     const needsBlankBefore = insertIndex > dateIndex + 1 && lines[insertIndex - 1].trim() !== "";
     const needsBlankAfter = insertIndex < lines.length && lines[insertIndex].trim() !== "";
-    lines.splice(
-      insertIndex,
-      0,
-      ...(needsBlankBefore ? [""] : []),
-      `### ${category}`,
-      "",
-      ...entryLines,
-      ...(needsBlankAfter ? [""] : []),
-    );
+    lines.splice(insertIndex, 0, ...(needsBlankBefore ? [""] : []), `### ${category}`, "", ...entryLines, ...(needsBlankAfter ? [""] : []));
   } else {
     let insertIndex = categoryIndex + 1;
     if (insertIndex < lines.length && lines[insertIndex].trim() === "") insertIndex++;
@@ -117,83 +137,57 @@ function addChangelogEntry(root: string, category: ChangelogCategory, descriptio
   writeFileSync(changelogPath, lines.join("\n"));
 }
 
-function latestChangelogBullet(root: string): { category?: ChangelogCategory; description?: string } {
-  const changelogPath = join(root, "CHANGELOG.md");
-  if (!existsSync(changelogPath)) return {};
-  const lines = readFileSync(changelogPath, "utf-8").split("\n");
-  let category: ChangelogCategory | undefined;
-  for (const line of lines) {
-    const categoryMatch = line.match(/^### (Added|Changed|Fixed|Removed)$/);
-    if (categoryMatch) {
-      category = categoryMatch[1] as ChangelogCategory;
-      continue;
-    }
-    const bulletMatch = line.match(/^-\s+(.+)$/);
-    if (bulletMatch) return { category, description: bulletMatch[1] };
-  }
-  return {};
+function colorGitLine(line: string, theme: any): string {
+  if (line.startsWith("diff --git") || line.startsWith("index ")) return theme.fg("muted", line);
+  if (line.startsWith("+++ ") || line.startsWith("--- ")) return theme.fg("warning", line);
+  if (line.startsWith("@@")) return theme.fg("accent", line);
+  if (line.startsWith("+")) return theme.fg("success", line);
+  if (line.startsWith("-")) return theme.fg("error", line);
+  if (/^## /.test(line)) return theme.fg("accent", line);
+  if (/^\?\? /.test(line) || /^A\s/.test(line)) return theme.fg("success", line);
+  if (/^\s?M\s|^M\s/.test(line)) return theme.fg("warning", line);
+  if (/^\s?D\s|^D\s/.test(line)) return theme.fg("error", line);
+  return theme.fg("fg", line);
 }
 
-async function promptForChangelog(ctx: ExtensionContext): Promise<{ category: ChangelogCategory; description: string } | null> {
-  const category = await ctx.ui.select("Changelog category", ["Added", "Changed", "Fixed", "Removed"]);
-  if (!category) return null;
-  const description = await ctx.ui.input("Changelog entry", "Brief user-facing summary of these changes");
-  if (!description || !description.trim()) return null;
-  return { category: category as ChangelogCategory, description: description.trim() };
+function sendGitOutput(pi: ExtensionAPI, title: string, kind: GitOutputDetails["kind"], content: string): void {
+  pi.sendMessage({
+    customType: "git-output",
+    content,
+    display: true,
+    details: { title, kind } satisfies GitOutputDetails,
+  });
 }
 
-function codeBlock(language: string, text: string): string {
-  return `\`\`\`${language}\n${text}\n\`\`\``;
-}
-
-async function handleStatus(ctx: ExtensionContext): Promise<void> {
+async function handleStatus(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
   const root = await repoRoot(ctx.cwd);
   const status = await runGit(root, ["status", "--short", "--branch"]);
-  ctx.ui.notify(status ? codeBlock("text", status) : "Working tree clean.", "info");
+  sendGitOutput(pi, "git status", "status", status || "Working tree clean.");
 }
 
-async function handleDiff(args: string, ctx: ExtensionContext): Promise<void> {
+async function handleDiff(pi: ExtensionAPI, args: string, ctx: ExtensionContext): Promise<void> {
   const root = await repoRoot(ctx.cwd);
   const parsedArgs = args.trim().length > 0 ? args.trim().split(/\s+/) : [];
-  const diffArgs = ["diff", ...parsedArgs];
-  const diff = await runGit(root, diffArgs, 1024 * 1024 * 32);
-  ctx.ui.notify(diff ? codeBlock("diff", truncate(diff, 240)) : "No diff.", "info");
+  const diff = await runGit(root, ["diff", ...parsedArgs], 1024 * 1024 * 32);
+  sendGitOutput(pi, `git diff${parsedArgs.length ? ` ${parsedArgs.join(" ")}` : ""}`, "diff", diff ? truncate(diff) : "No diff.");
 }
 
-async function handlePush(args: string, ctx: ExtensionContext): Promise<void> {
+async function handlePush(pi: ExtensionAPI, args: string, ctx: ExtensionContext): Promise<void> {
   const root = await repoRoot(ctx.cwd);
   const noChangelog = /(?:^|\s)--no-changelog(?:\s|$)/.test(args);
   const messageArg = args.replace(/(?:^|\s)--no-changelog(?:\s|$)/g, " ").trim();
 
   let status = await runGit(root, ["status", "--short"]);
   if (!status) {
-    ctx.ui.notify("No changes to commit.", "info");
+    sendGitOutput(pi, "git push", "push", "No changes to commit.");
     return;
   }
 
-  let changelogCategory: ChangelogCategory | undefined;
-  let changelogDescription: string | undefined;
+  const category = inferCategory(status);
+  const description = inferDescription(status);
   if (!noChangelog && existsSync(join(root, "CHANGELOG.md")) && !hasChangelogChange(status)) {
-    const entry = await promptForChangelog(ctx);
-    if (!entry) {
-      ctx.ui.notify("/git push cancelled: changelog entry is required unless CHANGELOG.md is already changed or --no-changelog is used.", "info");
-      return;
-    }
-    addChangelogEntry(root, entry.category, entry.description);
-    changelogCategory = entry.category;
-    changelogDescription = entry.description;
+    addChangelogEntry(root, category, description);
     status = await runGit(root, ["status", "--short"]);
-  } else if (!messageArg) {
-    const latest = latestChangelogBullet(root);
-    changelogCategory = latest.category;
-    changelogDescription = latest.description;
-  }
-
-  const preview = truncate(await runGit(root, ["status", "--short", "--branch"]), 120);
-  const ok = await ctx.ui.confirm("Commit and push?", `This will run git add -A, commit, and push origin HEAD.\n\n${preview}`);
-  if (!ok) {
-    ctx.ui.notify("/git push cancelled.", "info");
-    return;
   }
 
   ctx.ui.setStatus("git", "Staging changes…");
@@ -202,13 +196,11 @@ async function handlePush(args: string, ctx: ExtensionContext): Promise<void> {
   const staged = await runGit(root, ["diff", "--cached", "--name-only"]);
   if (!staged) {
     ctx.ui.setStatus("git", "");
-    ctx.ui.notify("No staged changes after git add -A.", "info");
+    sendGitOutput(pi, "git push", "push", "No staged changes after git add -A.");
     return;
   }
 
-  const fallback = changedFilesFromStatus(status).slice(0, 3).join(", ") || "project";
-  const subject = messageArg || commitSubject(changelogCategory, changelogDescription, fallback);
-
+  const subject = messageArg || commitSubject(category, description);
   ctx.ui.setStatus("git", "Committing changes…");
   const commitOutput = await runGit(root, ["commit", "-m", subject]);
 
@@ -216,10 +208,21 @@ async function handlePush(args: string, ctx: ExtensionContext): Promise<void> {
   const pushOutput = await runGit(root, ["push", "origin", "HEAD"]);
   ctx.ui.setStatus("git", "");
 
-  ctx.ui.notify(`Committed and pushed: ${subject}\n\n${truncate([commitOutput, pushOutput].filter(Boolean).join("\n"), 80)}`, "info");
+  sendGitOutput(pi, "git push", "push", `Committed and pushed: ${subject}\n\n${truncate([commitOutput, pushOutput].filter(Boolean).join("\n"), 80)}`);
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.registerMessageRenderer("git-output", (message, { outputPad }, theme) => {
+    const details = message.details as GitOutputDetails | undefined;
+    const title = details?.title ?? "git";
+    const headerColor = details?.kind === "error" ? "error" : details?.kind === "push" ? "success" : "accent";
+    const lines = String(message.content ?? "").split("\n");
+    const rendered = [theme.fg(headerColor, `▸ ${title}`), ...lines.map((line) => colorGitLine(line, theme))].join("\n");
+    const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
+    box.addChild(new Text(rendered, 0, 0));
+    return box;
+  });
+
   pi.registerCommand("git", {
     description: "Git helpers: /git status, /git diff [args], /git push [message] [--no-changelog]",
     handler: async (args, ctx) => {
@@ -228,20 +231,20 @@ export default function (pi: ExtensionAPI) {
         switch (subcommand) {
           case "status":
           case "st":
-            await handleStatus(ctx);
+            await handleStatus(pi, ctx);
             return;
           case "diff":
-            await handleDiff(rest.join(" "), ctx);
+            await handleDiff(pi, rest.join(" "), ctx);
             return;
           case "push":
-            await handlePush(rest.join(" "), ctx);
+            await handlePush(pi, rest.join(" "), ctx);
             return;
           default:
-            ctx.ui.notify("Usage: /git status | /git diff [args] | /git push [message] [--no-changelog]", "error");
+            sendGitOutput(pi, "git", "error", "Usage: /git status | /git diff [args] | /git push [message] [--no-changelog]");
         }
       } catch (error) {
         ctx.ui.setStatus("git", "");
-        ctx.ui.notify(`/git ${subcommand} failed:\n${error instanceof Error ? error.message : String(error)}`, "error");
+        sendGitOutput(pi, `/git ${subcommand} failed`, "error", error instanceof Error ? error.message : String(error));
       }
     },
   });
