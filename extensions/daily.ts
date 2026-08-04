@@ -302,7 +302,7 @@ const normalizeDailyMarkdown = (draft: string): string => {
 		.map((line) => {
 			const trimmed = line.trim();
 			if (!trimmed) return "";
-			if (trimmed === "*Recently Done:*" || trimmed === "*Done:*" || trimmed === "*In Progress:*" || trimmed === "*Next:*") {
+			if (/^\*(?:✅\s+)?(?:Recently Done|Done):\*$/.test(trimmed) || /^\*(?:🚧\s+)?In Progress:\*$/.test(trimmed) || /^\*(?:➡️\s+)?Next:\*$/.test(trimmed)) {
 				inBulletSection = true;
 				return trimmed;
 			}
@@ -334,17 +334,17 @@ const buildDaily = async (root: string, options: DailyOptions): Promise<string> 
 	const lines = [
 		"**PiNative**",
 		"",
-		"*Done:*",
+		"*✅ Done:*",
 		...formatBullets(done, `No committed changes found in the last ${options.since}.`, 8),
 	];
 
 	if (hasTodo) {
 		lines.push(
 			"",
-			"*In Progress:*",
+			"*🚧 In Progress:*",
 			...formatBullets(inProgress, "No active TODOs found.", 6),
 			"",
-			"*Next:*",
+			"*➡️ Next:*",
 			...formatBullets(next, "No next TODOs found.", 4),
 		);
 	}
