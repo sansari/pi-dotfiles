@@ -1,5 +1,5 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Text } from "@earendil-works/pi-tui";
 import { execFile, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -355,8 +355,11 @@ const buildDaily = async (root: string, options: DailyOptions): Promise<string> 
 export default function dailyExtension(pi: ExtensionAPI) {
 	pi.registerEntryRenderer<DailyUpdateEntry>("daily-update", (entry, _context, theme) => {
 		const data = entry.data ?? { draft: "", copied: false, timestamp: Date.now() };
+		const container = new Container();
 		const header = `${theme.fg("accent", "Daily update")} ${theme.fg("dim", data.copied ? "copied to clipboard" : "not copied")}`;
-		return new Text(`${header}\n\n${data.draft}`, 0, 0);
+		container.addChild(new Text(header, 0, 0));
+		container.addChild(new Markdown(data.draft, 0, 1, getMarkdownTheme()));
+		return container;
 	});
 
 	pi.registerCommand("daily", {
