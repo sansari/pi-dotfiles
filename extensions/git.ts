@@ -142,10 +142,14 @@ async function promptForChangelog(ctx: ExtensionContext): Promise<{ category: Ch
   return { category: category as ChangelogCategory, description: description.trim() };
 }
 
+function codeBlock(language: string, text: string): string {
+  return `\`\`\`${language}\n${text}\n\`\`\``;
+}
+
 async function handleStatus(ctx: ExtensionContext): Promise<void> {
   const root = await repoRoot(ctx.cwd);
   const status = await runGit(root, ["status", "--short", "--branch"]);
-  ctx.ui.notify(status || "Working tree clean.", "info");
+  ctx.ui.notify(status ? codeBlock("text", status) : "Working tree clean.", "info");
 }
 
 async function handleDiff(args: string, ctx: ExtensionContext): Promise<void> {
@@ -153,7 +157,7 @@ async function handleDiff(args: string, ctx: ExtensionContext): Promise<void> {
   const parsedArgs = args.trim().length > 0 ? args.trim().split(/\s+/) : [];
   const diffArgs = ["diff", ...parsedArgs];
   const diff = await runGit(root, diffArgs, 1024 * 1024 * 32);
-  ctx.ui.notify(diff ? truncate(diff, 240) : "No diff.", "info");
+  ctx.ui.notify(diff ? codeBlock("diff", truncate(diff, 240)) : "No diff.", "info");
 }
 
 async function handlePush(args: string, ctx: ExtensionContext): Promise<void> {
