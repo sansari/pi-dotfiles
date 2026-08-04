@@ -35,14 +35,30 @@ function mdToHtml(md: string): string {
   const lines = md.split("\n");
   const out: string[] = [];
   let i = 0;
-  const listStack: string[] = [];
-  const closeList = () => { while (listStack.length) out.push(listStack.pop() as string); };
+  const listStack: Array<"ul" | "ol"> = [];
+  const closeLists = (depth = 0) => {
+    while (listStack.length > depth) {
+      out.push(`</${listStack.pop()}>`);
+    }
+  };
+  const openList = (type: "ul" | "ol", depth: number) => {
+    while (listStack.length > depth + 1) {
+      out.push(`</${listStack.pop()}>`);
+    }
+    if (listStack[depth] && listStack[depth] !== type) {
+      closeLists(depth);
+    }
+    if (!listStack[depth]) {
+      out.push(`<${type}>`);
+      listStack[depth] = type;
+    }
+  };
 
   while (i < lines.length) {
     const line = lines[i];
 
     if (/^```/.test(line)) {
-      closeList();
+      closeLists();
       const buf: string[] = [];
       i++;
       while (i < lines.length && !/^```/.test(lines[i])) { buf.push(esc(lines[i])); i++; }
@@ -52,7 +68,7 @@ function mdToHtml(md: string): string {
     }
 
     if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
-      closeList();
+      closeLists();
       const parseRow = (r: string) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
       const headers = parseRow(line);
       i += 2;
@@ -67,7 +83,7 @@ function mdToHtml(md: string): string {
 
     const h = line.match(/^(#{1,6})\s+(.*)$/);
     if (h) {
-      closeList();
+      closeLists();
       const lvl = h[1].length;
       const id = h[2].toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       out.push(`<h${lvl} id="${id}">${inline(h[2])}</h${lvl}>`);
@@ -76,19 +92,21 @@ function mdToHtml(md: string): string {
     }
 
     if (/^\s*>/.test(line)) {
-      closeList();
+      closeLists();
       const buf: string[] = [];
       while (i < lines.length && /^\s*>/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, "")); i++; }
       out.push(`<blockquote>${mdToHtml(buf.join("\n"))}</blockquote>`);
       continue;
     }
 
-    const li = line.match(/^(\s*)[-*]\s+(.*)$/);
-    if (li) {
-      const depth = Math.floor(li[1].length / 2);
-      while (listStack.length > depth + 1) out.push(listStack.pop() as string);
-      if (listStack.length < depth + 1) { out.push("<ul>"); listStack.push("</ul>"); }
-      let item = li[2];
+    const unordered = line.match(/^(\s*)[-*]\s+(.*)$/);
+    const ordered = line.match(/^(\s*)\d+\.\s+(.*)$/);
+    if (unordered || ordered) {
+      const match = unordered ?? ordered;
+      const type: "ul" | "ol" = ordered ? "ol" : "ul";
+      const depth = Math.floor(match![1].length / 2);
+      openList(type, depth);
+      let item = match![2];
       let prefix = "";
       if (/^\[ \]\s+/.test(item)) { prefix = '<span class="cb">\u2610</span> '; item = item.replace(/^\[ \]\s+/, ""); }
       else if (/^\[x\]\s+/i.test(item)) { prefix = '<span class="cb done">\u2611</span> '; item = item.replace(/^\[x\]\s+/i, ""); }
@@ -99,18 +117,18 @@ function mdToHtml(md: string): string {
       continue;
     }
 
-    if (/^---+\s*$/.test(line)) { closeList(); out.push("<hr>"); i++; continue; }
-    if (/^\s*$/.test(line)) { closeList(); i++; continue; }
+    if (/^---+\s*$/.test(line)) { closeLists(); out.push("<hr>"); i++; continue; }
+    if (/^\s*$/.test(line)) { closeLists(); i++; continue; }
 
-    closeList();
+    closeLists();
     const buf = [line];
     i++;
-    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,6}\s|```|\s*>|\s*[-*]\s|---+\s*$|\s*\|)/.test(lines[i])) {
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,6}\s|```|\s*>|\s*[-*]\s|\s*\d+\.\s|---+\s*$|\s*\|)/.test(lines[i])) {
       buf.push(lines[i]); i++;
     }
     out.push(`<p>${inline(buf.join(" "))}</p>`);
   }
-  closeList();
+  closeLists();
   return out.join("\n");
 }
 
