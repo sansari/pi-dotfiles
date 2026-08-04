@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 type CommandResult = { stdout: string; stderr: string };
-type DailyOptions = { since: string; copy: boolean };
+type DailyOptions = { since: string; copy: boolean; usesDefaultWindow: boolean };
 type DailyUpdateEntry = { draft: string; copied: boolean; timestamp: number };
 
 type TodoSections = {
@@ -41,7 +41,11 @@ const parseOptions = (args: string): DailyOptions => {
 		else sinceParts.push(token);
 	}
 
-	return { since: sinceParts.length > 0 ? sinceParts.join(" ") : "24 hours ago", copy };
+	return {
+		since: sinceParts.length > 0 ? sinceParts.join(" ") : "24 hours ago",
+		copy,
+		usesDefaultWindow: sinceParts.length === 0,
+	};
 };
 
 const stripMarkdownTask = (line: string): string => {
@@ -100,19 +104,17 @@ const commitSubjectsSince = async (root: string, since: string): Promise<string[
 	return commits.split("\n").map((line) => line.trim()).filter(Boolean);
 };
 
-const latestCommitFallbackSince = async (root: string): Promise<string | undefined> => {
+const latestCommitAnchoredSince = async (root: string): Promise<string | undefined> => {
 	const latestUnix = await runGit(root, ["log", "-1", "--format=%ct"]).catch(() => "");
 	const latestSeconds = Number.parseInt(latestUnix, 10);
 	if (!Number.isFinite(latestSeconds)) return undefined;
 	return new Date((latestSeconds - 24 * 60 * 60) * 1000).toISOString();
 };
 
-const summarizeCommits = async (root: string, since: string): Promise<string[]> => {
-	const commits = await commitSubjectsSince(root, since);
-	if (commits.length > 0) return commits;
-
-	const fallbackSince = await latestCommitFallbackSince(root);
-	return fallbackSince ? commitSubjectsSince(root, fallbackSince) : [];
+const summarizeCommits = async (root: string, options: DailyOptions): Promise<string[]> => {
+	const anchoredSince = options.usesDefaultWindow ? await latestCommitAnchoredSince(root) : undefined;
+	const since = anchoredSince ?? options.since;
+	return commitSubjectsSince(root, since);
 };
 
 const isLowSignalChange = (item: string): boolean => {
@@ -253,7 +255,7 @@ const buildDaily = async (root: string, options: DailyOptions): Promise<string> 
 	const hasTodo = existsSync(todoPath);
 	const todo = hasTodo ? readFileSync(todoPath, "utf8") : "";
 	const sections = parseTodoSections(todo);
-	const commits = await summarizeCommits(root, options.since);
+	const commits = await summarizeCommits(root, options);
 	const changelog = todayChangelogBullets(root);
 	const done = [...changelog, ...commits.filter((commit) => !changelog.some((entry) => commit.toLowerCase().includes(entry.slice(0, 30).toLowerCase())))]
 		.filter((item) => !isLowSignalChange(item));
