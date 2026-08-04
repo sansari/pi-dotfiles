@@ -54,8 +54,8 @@ const stripMarkdownTask = (line: string): string => {
 		.replace(/^[-*]\s+\[[ xX]\]\s+/, "")
 		.replace(/^\d+\.\s+/, "")
 		.replace(/^[-*]\s+/, "")
-		.replace(/^\*\*\((feat|bug)\)\s*/i, "**")
-		.replace(/^\*\*((feat|bug):\s*)/i, "$1")
+		.replace(/^\*\*\((feat|bug|chore)\)\s*/i, "**")
+		.replace(/^\*\*((feat|bug|chore):\s*)/i, "$1")
 		.replace(/\*\*$/g, "")
 		.replace(/\s+/g, " ")
 		.trim();
@@ -156,14 +156,18 @@ const stripDecorativeMarkdown = (text: string): string =>
 		.replace(/^[-*]\s+/, "")
 		.replace(/\*\*/g, "")
 		.replace(/^\d{4}-\d{2}-\d{2}\s+/, "")
-		.replace(/^\((feat|bug)\)\s*/i, "")
+		.replace(/^\((feat|bug|chore)\)\s*/i, "")
 		.trim();
 
 const titleCase = (text: string): string =>
 	text
 		.split(/\s+/)
 		.filter(Boolean)
-		.map((word) => word.length <= 3 && word === word.toLowerCase() ? word : `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
+		.map((word) => {
+			if (/^[A-Z0-9]{2,}$/.test(word)) return word;
+			if (word.length <= 3 && word === word.toLowerCase()) return word;
+			return `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
+		})
 		.join(" ");
 
 const applySimpleEnglish = (text: string): string =>
@@ -181,44 +185,95 @@ const applySimpleEnglish = (text: string): string =>
 		.replace(/\b[Ss]eamlessly\b/g, "")
 		.replace(/\b[Rr]obust\b/g, "")
 		.replace(/\b[Cc]omprehensive\b/g, "")
+		.replace(/\boepns\b/gi, "opens")
+		.replace(/\bcombei?nd\b/gi, "combined")
+		.replace(/\bbg\b/gi, "background")
 		.replace(/\s+/g, " ")
 		.trim();
 
+const stripTodoPrefix = (text: string): string => text.replace(/^(feat|bug|chore)\s*:\s*/i, "").trim();
+
+const cleanDailyItem = (item: string): string =>
+	applySimpleEnglish(stripTodoPrefix(stripDecorativeMarkdown(item).replace(/\s+/g, " ").trim()))
+		.replace(/\s+\([0-9a-f]{7,}\)$/i, "")
+		.trim();
+
+const truncateDetail = (detail: string, max = 190): string => {
+	const clean = detail.trim().replace(/\s+/g, " ");
+	return clean.length <= max ? clean : `${clean.slice(0, max - 1).replace(/\s+\S*$/, "").trim()}…`;
+};
+
+const projectSummary = (item: string): { title: string; detail?: string } | undefined => {
+	const text = cleanDailyItem(item);
+	const normalized = text.toLowerCase();
+
+	if (normalized.includes("dmg release distribution plan") || normalized.includes("documented the dmg release distribution plan")) {
+		return {
+			title: "DMG release planning",
+			detail: "documented the release path covering Apple Developer enrollment, Developer ID signing, notarization, manual GitHub release publication, polished DMG artwork, and checksums.",
+		};
+	}
+	if (normalized.includes("internal unsigned dmg") || normalized.includes("unsigned dmg build")) {
+		return {
+			title: "Internal unsigned DMG build",
+			detail: "added the packaging path for coworker testing, including shared scheme, build script, checksum output, warning text, and local docs.",
+		};
+	}
+	if (normalized.includes("limit quick chats") || normalized.includes("quick chats to five") || normalized.includes("quick chats sidebar overflow")) {
+		return { title: "Quick Chats overflow", detail: "limited collapsed Quick Chats to 5 rows before showing the ellipsis expander." };
+	}
+	if (normalized.includes("sidebar overflow ellipsis") || normalized.includes("project sidebar overflow ellipsis")) {
+		return { title: "Sidebar overflow ellipsis", detail: "kept the overflow dots centered inside their hover pill with polished spacing." };
+	}
+	if (normalized.includes("left sidebar") && (normalized.includes("top gray") || normalized.includes("window chrome") || normalized.includes("menubar"))) {
+		return { title: "Sidebar chrome match", detail: "matched the left sidebar background to the shared window chrome color." };
+	}
+	if (normalized.includes("review failing requirements checks")) {
+		return { title: "Requirements checks", detail: "review failing requirement coverage and update the affected tests." };
+	}
+	if (normalized.includes("complete dmg distribution milestone")) {
+		return { title: "DMG distribution milestone", detail: "complete signed/notarized release packaging, release workflow, docs, and maintainer checklist." };
+	}
+	if (normalized.includes("effort selector") || normalized.includes("effort picker")) {
+		return { title: "Effort picker", detail: "split effort selection into its own compose control." };
+	}
+	if (normalized.includes("settings section") && normalized.includes("models")) {
+		return { title: "Model favorites settings", detail: "add searchable model favorites, default from the current Pi model, and test OpenRouter/local model configs." };
+	}
+	if (normalized.includes("archived chats")) {
+		return { title: "Archived Chats bug", detail: "open the correct pane and improve unarchive visibility in light and dark mode." };
+	}
+	if (normalized.includes("hiding left sidebar hides the compose box") || normalized.includes("left sidebar toggle")) {
+		return { title: "Sidebar collapse bug", detail: "fix hiding the left sidebar also hiding the compose box." };
+	}
+
+	return undefined;
+};
+
 const splitBullet = (item: string): { title: string; detail?: string } => {
-	const clean = applySimpleEnglish(stripDecorativeMarkdown(item).replace(/\s+/g, " ").trim());
-	const explicit = clean.match(/^(.{3,70}?)(?:\s+[-–—:]\s+)(.+)$/);
+	const project = projectSummary(item);
+	if (project) return project;
+
+	const clean = cleanDailyItem(item);
+	const explicit = clean.match(/^(.{3,72}?)(?:\s+[-–—:]\s+)(.+)$/);
 	if (explicit) {
-		return { title: titleCase(explicit[1].trim().replace(/[.,;:]$/, "")), detail: explicit[2].trim() };
+		return { title: titleCase(explicit[1].trim().replace(/[.,;:]$/, "")), detail: truncateDetail(explicit[2]) };
 	}
 
-	const withoutHash = clean.replace(/\s+\([0-9a-f]{7,}\)$/i, "").trim();
-
-	const nowClause = withoutHash.match(/^(.{3,58}?)\s+now\s+(.+)$/i);
-	if (nowClause) {
-		return { title: titleCase(nowClause[1].trim()), detail: `now ${nowClause[2].trim()}` };
-	}
-
-	const sentence = withoutHash.match(/^(.{8,62}?)\.\s+(.+)$/);
+	const sentence = clean.match(/^(.{8,72}?)\.\s+(.+)$/);
 	if (sentence) {
-		return { title: titleCase(sentence[1].trim().replace(/[.,;:]$/, "")), detail: sentence[2].trim() };
+		return { title: titleCase(sentence[1].trim().replace(/[.,;:]$/, "")), detail: truncateDetail(sentence[2]) };
 	}
 
-	const firstClause = withoutHash.match(/^(.{3,56}?)(?:\s+(?:with|by|so that|so|including)\s+)(.+)$/i);
+	const firstClause = clean.match(/^(.{3,72}?)(?:\s+(?:with|by|so that|including)\s+)(.+)$/i);
 	if (firstClause) {
 		return {
 			title: titleCase(firstClause[1].trim().replace(/[.,;:]$/, "")),
-			detail: firstClause[2].trim(),
+			detail: truncateDetail(firstClause[2]),
 		};
 	}
 
-	const words = withoutHash.split(/\s+/).filter(Boolean);
-	if (words.length <= 6) {
-		return { title: titleCase(withoutHash.replace(/[.,;:]$/, "")) };
-	}
-
-	const title = words.slice(0, 5).join(" ").replace(/[.,;:]$/, "");
-	const detail = words.slice(5).join(" ").trim();
-	return { title: titleCase(title), detail };
+	return { title: titleCase(truncateDetail(clean.replace(/[.,;:]$/, ""), 90)) };
 };
 
 const formatBullet = (item: string): string => {
@@ -229,6 +284,15 @@ const formatBullet = (item: string): string => {
 const formatBullets = (items: string[], fallback: string, limit = 6): string[] => {
 	const selected = items.slice(0, limit);
 	return (selected.length > 0 ? selected : [fallback]).map(formatBullet);
+};
+
+const similarEnough = (left: string, right: string): boolean => {
+	const leftTokens = new Set(cleanDailyItem(left).toLowerCase().split(/\W+/).filter((token) => token.length > 3));
+	const rightTokens = new Set(cleanDailyItem(right).toLowerCase().split(/\W+/).filter((token) => token.length > 3));
+	if (leftTokens.size === 0 || rightTokens.size === 0) return false;
+	let overlap = 0;
+	for (const token of leftTokens) if (rightTokens.has(token)) overlap++;
+	return overlap >= 2 || overlap / Math.min(leftTokens.size, rightTokens.size) >= 0.45;
 };
 
 const normalizeDailyMarkdown = (draft: string): string => {
@@ -261,18 +325,16 @@ const buildDaily = async (root: string, options: DailyOptions): Promise<string> 
 	const commits = await summarizeCommits(root, options);
 	const changelog = todayChangelogBullets(root);
 	const todoDone = sections.done;
-	const done = [
-		...todoDone,
-		...changelog.filter((entry) => !todoDone.some((item) => item.toLowerCase().includes(entry.slice(0, 30).toLowerCase()))),
-		...commits.filter((commit) => ![...todoDone, ...changelog].some((entry) => commit.toLowerCase().includes(entry.slice(0, 30).toLowerCase()))),
-	].filter((item) => !isLowSignalChange(item));
+	const changelogOnly = changelog.filter((entry) => !todoDone.some((item) => similarEnough(item, entry)));
+	const commitOnly = commits.filter((commit) => ![...todoDone, ...changelog].some((entry) => similarEnough(entry, commit)));
+	const done = [...todoDone, ...changelogOnly, ...commitOnly].filter((item) => !isLowSignalChange(item));
 	const inProgress = [...sections.inProgress];
 	const next = sections.next.length > 0 ? sections.next : sections.critical;
 
 	const lines = [
 		"**Pi Native**",
 		"",
-		"*Recently Done:*",
+		"*Done:*",
 		...formatBullets(done, `No committed changes found in the last ${options.since}.`, 8),
 	];
 
@@ -283,7 +345,7 @@ const buildDaily = async (root: string, options: DailyOptions): Promise<string> 
 			...formatBullets(inProgress, "No active TODOs found.", 6),
 			"",
 			"*Next:*",
-			...formatBullets(next, "No next TODOs found.", 5),
+			...formatBullets(next, "No next TODOs found.", 4),
 		);
 	}
 
