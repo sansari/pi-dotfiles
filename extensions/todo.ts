@@ -15,8 +15,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { Type } from "typebox";
+
+const execFileAsync = promisify(execFile);
 
 interface Todo {
 	id: number;
@@ -61,6 +64,91 @@ async function findTodosPreviewFile(cwd: string): Promise<string | null> {
 		}
 	}
 	return null;
+}
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+	try {
+		const result = await execFileAsync("git", args, { cwd, maxBuffer: 1024 * 1024 * 8 });
+		return String(result.stdout ?? "").trim();
+	} catch (error) {
+		const err = error as Error & { stdout?: string; stderr?: string };
+		throw new Error(`git ${args.join(" ")} failed: ${err.stderr || err.stdout || err.message}`);
+	}
+}
+
+function truncateForCommit(text: string): string {
+	const clean = normalizeTodoText(text)
+		.replace(/[`*_#>\[\]()]/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	return clean.length <= 72 ? clean : `${clean.slice(0, 69).trim()}...`;
+}
+
+function changelogCategoryForTodo(text: string): "Added" | "Changed" | "Fixed" {
+	const normalized = normalizeTodoText(text).toLowerCase();
+	if (normalized.startsWith("bug:")) return "Fixed";
+	if (normalized.startsWith("feat:")) return "Changed";
+	return "Changed";
+}
+
+function changelogDescriptionForTodo(text: string): string {
+	return `Completed TODO: ${normalizeTodoText(text).replace(/^(feat|bug):\s*/i, "")}`;
+}
+
+async function addChangelogEntryIfPresent(repoRoot: string, todoText: string): Promise<void> {
+	const changelogPath = path.join(repoRoot, "CHANGELOG.md");
+	let changelog: string;
+	try {
+		changelog = await fs.readFile(changelogPath, "utf-8");
+	} catch {
+		return;
+	}
+
+	const today = new Date().toLocaleDateString("en-CA");
+	const category = changelogCategoryForTodo(todoText);
+	const bullet = `- ${changelogDescriptionForTodo(todoText)}`;
+
+	if (changelog.includes(bullet)) return;
+
+	const todayHeading = `## ${today}`;
+	const categoryHeading = `### ${category}`;
+	if (!changelog.includes(todayHeading)) {
+		const prefix = changelog.startsWith("# Changelog\n") ? "# Changelog\n\n" : "";
+		const rest = prefix ? changelog.slice(prefix.length) : changelog;
+		await fs.writeFile(changelogPath, `${prefix}${todayHeading}\n\n${categoryHeading}\n\n${bullet}\n\n${rest}`, "utf-8");
+		return;
+	}
+
+	const todayStart = changelog.indexOf(todayHeading);
+	const nextDayMatch = changelog.slice(todayStart + todayHeading.length).match(/\n## \d{4}-\d{2}-\d{2}/);
+	const todayEnd = nextDayMatch ? todayStart + todayHeading.length + nextDayMatch.index! : changelog.length;
+	const before = changelog.slice(0, todayStart);
+	let todayBlock = changelog.slice(todayStart, todayEnd);
+	const after = changelog.slice(todayEnd);
+
+	if (!todayBlock.includes(categoryHeading)) {
+		todayBlock = todayBlock.replace(/(## \d{4}-\d{2}-\d{2}\n+)/, `$1\n${categoryHeading}\n\n${bullet}\n`);
+	} else {
+		const categoryStart = todayBlock.indexOf(categoryHeading);
+		const nextCategoryMatch = todayBlock.slice(categoryStart + categoryHeading.length).match(/\n### /);
+		const insertAt = nextCategoryMatch ? categoryStart + categoryHeading.length + nextCategoryMatch.index! : todayBlock.length;
+		const insertion = todayBlock[insertAt - 1] === "\n" ? `${bullet}\n` : `\n${bullet}\n`;
+		todayBlock = `${todayBlock.slice(0, insertAt)}${insertion}${todayBlock.slice(insertAt)}`;
+	}
+
+	await fs.writeFile(changelogPath, `${before}${todayBlock}${after}`, "utf-8");
+}
+
+async function commitAndPushFinishedTodo(cwd: string, todoText: string): Promise<string> {
+	const repoRoot = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+	await addChangelogEntryIfPresent(repoRoot, todoText);
+	await runGit(repoRoot, ["add", "-A"]);
+	const status = await runGit(repoRoot, ["status", "--porcelain"]);
+	if (!status) return "No git changes to commit.";
+	const subject = `Finish TODO: ${truncateForCommit(todoText)}`;
+	await runGit(repoRoot, ["commit", "-m", subject]);
+	await runGit(repoRoot, ["push", "origin", "HEAD"]);
+	return `Committed and pushed: ${subject}`;
 }
 
 type TodoPriority = "in-progress" | "next" | "backlog";
@@ -479,9 +567,9 @@ export default function (pi: ExtensionAPI) {
 							"/todos format — rewrite todos as numbered lists using feat:/bug: prefixes when present",
 							"/todos next TEXT — add TEXT to the top of Next",
 							"/todos backlog TEXT — add TEXT to the top of Backlog",
-							"/todos start N — move item N from Next to In Progress",
+							"/todos start N — move item N from Next to In Progress, then ask the agent to review and propose an implementation plan",
 							"/todos status N — ask the agent for status on item N in In Progress; completed items should be removed",
-							"/todos finish N — remove item N from In Progress",
+							"/todos finish N — remove item N from In Progress, format TODO.md, update changelog when present, then commit and push",
 						].join("\n"), "info");
 						return;
 					}
@@ -506,6 +594,7 @@ export default function (pi: ExtensionAPI) {
 						moveTodoToPriority(todo, "in-progress");
 						await saveToFile();
 						ctx.ui.notify(`Started: ${todo.text}`, "success");
+						pi.sendUserMessage(`Review this newly started In Progress TODO and propose an implementation plan before making changes:\n\n${todo.text}\n\nInspect the relevant project files and current state. Give a concise plan with the likely files to change, verification steps, and any risks or questions. Prompt me to proceed before implementing.`);
 						return;
 					}
 
@@ -537,7 +626,9 @@ export default function (pi: ExtensionAPI) {
 						}
 						removeTodo(todo);
 						await saveToFile();
-						ctx.ui.notify(`Finished: ${todo.text}`, "success");
+						await reloadAndSave();
+						const gitResult = await commitAndPushFinishedTodo(ctx.cwd, todo.text);
+						ctx.ui.notify(`Finished: ${todo.text}\n${gitResult}`, "success");
 						return;
 					}
 
