@@ -148,6 +148,14 @@ async function handleStatus(ctx: ExtensionContext): Promise<void> {
   ctx.ui.notify(status || "Working tree clean.", "info");
 }
 
+async function handleDiff(args: string, ctx: ExtensionContext): Promise<void> {
+  const root = await repoRoot(ctx.cwd);
+  const parsedArgs = args.trim().length > 0 ? args.trim().split(/\s+/) : [];
+  const diffArgs = ["diff", ...parsedArgs];
+  const diff = await runGit(root, diffArgs, 1024 * 1024 * 32);
+  ctx.ui.notify(diff ? truncate(diff, 240) : "No diff.", "info");
+}
+
 async function handlePush(args: string, ctx: ExtensionContext): Promise<void> {
   const root = await repoRoot(ctx.cwd);
   const noChangelog = /(?:^|\s)--no-changelog(?:\s|$)/.test(args);
@@ -209,7 +217,7 @@ async function handlePush(args: string, ctx: ExtensionContext): Promise<void> {
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("git", {
-    description: "Git helpers: /git status, /git push [message] [--no-changelog]",
+    description: "Git helpers: /git status, /git diff [args], /git push [message] [--no-changelog]",
     handler: async (args, ctx) => {
       const [subcommand = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       try {
@@ -218,11 +226,14 @@ export default function (pi: ExtensionAPI) {
           case "st":
             await handleStatus(ctx);
             return;
+          case "diff":
+            await handleDiff(rest.join(" "), ctx);
+            return;
           case "push":
             await handlePush(rest.join(" "), ctx);
             return;
           default:
-            ctx.ui.notify("Usage: /git status | /git push [message] [--no-changelog]", "error");
+            ctx.ui.notify("Usage: /git status | /git diff [args] | /git push [message] [--no-changelog]", "error");
         }
       } catch (error) {
         ctx.ui.setStatus("git", "");
