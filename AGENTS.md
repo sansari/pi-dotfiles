@@ -5,7 +5,7 @@
 - Use Playwright to visually verify changes by inspecting them yourself on the relevant local server.
 - Assume the local development server is already running separately unless proven otherwise; browse directly to the relevant local URL.
 - Do NOT assume you cannot browse to a URL. You can browse to URLs and must use that ability for verification.
-- Do NOT ask the user to verify changes for you. Check them yourself first.
+- Always test changes yourself first. However, if your changes require manual testing, offer to run a live interactive test, or suggest user verifies it themselves.
 - Do NOT mark a task complete if it can be visually verified and you have not visually verified it. Visual verification is required before completion.
 - After making CSS/HTML/layout/content-rendering changes, open the relevant page with Playwright, inspect the result, and confirm the change worked.
 - Only report back to the user once you've verified the changes are correct.
@@ -25,6 +25,13 @@
 
 - Keep tool-step narration terse: one short sentence such as “Rebuilding and inspecting.” Avoid long status explanations unless the user asks for details.
 
+## Reliable hooks and effects
+
+- Never use an arbitrary delay, sleep, debounce, polling quiet period, or other timing heuristic as a substitute for an authoritative lifecycle or completion signal.
+- Effects and hooks must attach to a documented, deterministic signal and preserve causal event ordering from the source through the handler.
+- Timing may improve presentation or rate-limit work only after correctness is independent of the timing value.
+- If no reliable signal exists, expose or build an explicit state transition, event, acknowledgment, or ordered pipeline before implementing the dependent effect.
+
 ## Development workflow
 
 For non-trivial implementation work, complete the loop in this order before reporting completion:
@@ -35,9 +42,9 @@ For non-trivial implementation work, complete the loop in this order before repo
 4. Ask a fresh-context reviewer/subagent to review the implementation diff when available.
 5. Fix blocking review findings, or explicitly document why they are deferred.
 6. Update and run relevant automated tests.
-7. Recheck requirements with `npx rfc2119 check` when the repository uses 2119.
+7. When preparing to push changes in a repository that uses 2119, run `npx rfc2119 check` immediately before the push.
 
-The implementation review is separate from 2119 requirement/test review. Do not mark the task complete until verification, review, tests, and requirement checks are done, or any blocker is clearly reported.
+The implementation review is separate from 2119 requirement/test review. After implementing a feature or fix, run its focused relevant tests to verify the change. For ordinary local tasks, do not mark the task complete until verification, review, and those focused tests are done, or any blocker is clearly reported. Do not run the full `rfc2119 check` suite merely to finish an individual task; reserve it for the pre-push gate.
 
 ## Plans
 
