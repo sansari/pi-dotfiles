@@ -14,5 +14,7 @@
   },
   "followUpMode": "all",
   "steeringMode": "all",
-  "quietStartup": true
+  "quietStartup": true,
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "medium"
 }
