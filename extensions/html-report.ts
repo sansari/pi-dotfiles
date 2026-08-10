@@ -41,7 +41,25 @@ function mdToHtml(md: string): string {
       out.push(`</${listStack.pop()}>`);
     }
   };
-  const openList = (type: "ul" | "ol", depth: number) => {
+  const listMatch = (value: string) => value.match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
+  const continuationMatch = (value: string) => value.match(/^\s{2,}\S/);
+  const appendToLastListItem = (content: string) => {
+    for (let j = out.length - 1; j >= 0; j--) {
+      if (/^<li[\s>]/.test(out[j]) && out[j].endsWith("</li>")) {
+        const rendered = /^</.test(content.trim()) ? content.trim() : `<p>${inline(content.trim())}</p>`;
+        out[j] = out[j].replace(/<\/li>$/, `${rendered}</li>`);
+        return true;
+      }
+    }
+    return false;
+  };
+  const nextNonBlankLine = (from: number) => {
+    for (let j = from; j < lines.length; j++) {
+      if (!/^\s*$/.test(lines[j])) return lines[j];
+    }
+    return "";
+  };
+  const openList = (type: "ul" | "ol", depth: number, start?: number) => {
     while (listStack.length > depth + 1) {
       out.push(`</${listStack.pop()}>`);
     }
@@ -49,7 +67,8 @@ function mdToHtml(md: string): string {
       closeLists(depth);
     }
     if (!listStack[depth]) {
-      out.push(`<${type}>`);
+      const startAttr = type === "ol" && start && start !== 1 ? ` start="${start}"` : "";
+      out.push(`<${type}${startAttr}>`);
       listStack[depth] = type;
     }
   };
@@ -57,13 +76,19 @@ function mdToHtml(md: string): string {
   while (i < lines.length) {
     const line = lines[i];
 
-    if (/^```/.test(line)) {
-      closeLists();
+    if (/^\s*```/.test(line)) {
+      const inList = listStack.length > 0;
       const buf: string[] = [];
       i++;
-      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(esc(lines[i])); i++; }
+      while (i < lines.length && !/^\s*```/.test(lines[i])) {
+        const codeLine = inList ? lines[i].replace(/^\s{2,}/, "") : lines[i];
+        buf.push(esc(codeLine));
+        i++;
+      }
       i++;
-      out.push(`<pre><code>${buf.join("\n")}</code></pre>`);
+      const block = `<pre><code>${buf.join("\n")}</code></pre>`;
+      if (inList) appendToLastListItem(block);
+      else out.push(block);
       continue;
     }
 
@@ -100,13 +125,14 @@ function mdToHtml(md: string): string {
     }
 
     const unordered = line.match(/^(\s*)[-*]\s+(.*)$/);
-    const ordered = line.match(/^(\s*)\d+\.\s+(.*)$/);
+    const ordered = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
     if (unordered || ordered) {
       const match = unordered ?? ordered;
       const type: "ul" | "ol" = ordered ? "ol" : "ul";
       const depth = Math.floor(match![1].length / 2);
-      openList(type, depth);
-      let item = match![2];
+      const start = ordered ? Number(ordered[2]) : undefined;
+      openList(type, depth, start);
+      let item = ordered ? ordered[3] : match![2];
       let prefix = "";
       if (/^\[ \]\s+/.test(item)) { prefix = '<span class="cb">\u2610</span> '; item = item.replace(/^\[ \]\s+/, ""); }
       else if (/^\[x\]\s+/i.test(item)) { prefix = '<span class="cb done">\u2611</span> '; item = item.replace(/^\[x\]\s+/i, ""); }
@@ -117,8 +143,24 @@ function mdToHtml(md: string): string {
       continue;
     }
 
+    if (listStack.length > 0 && continuationMatch(line) && !listMatch(line)) {
+      appendToLastListItem(line);
+      i++;
+      continue;
+    }
+
     if (/^---+\s*$/.test(line)) { closeLists(); out.push("<hr>"); i++; continue; }
-    if (/^\s*$/.test(line)) { closeLists(); i++; continue; }
+    if (/^\s*$/.test(line)) {
+      // Keep lists open across blank lines when the next content line is another
+      // list item or an indented continuation of the previous item. Markdown
+      // plans often space numbered items apart for editing; closing the <ol>
+      // here restarts every item at 1 in the generated HTML.
+      const next = nextNonBlankLine(i + 1);
+      const keepListOpen = listStack.length > 0 && (listMatch(next) || continuationMatch(next));
+      if (!keepListOpen) closeLists();
+      i++;
+      continue;
+    }
 
     closeLists();
     const buf = [line];
@@ -174,7 +216,7 @@ th{background:var(--code);}
 hr{border:none;border-top:1px solid var(--border);margin:1.4em 0;}
 hr.sep{margin:3.5em 0;border-top:2px dashed var(--border);}
 .cb{font-weight:700;color:var(--muted);} .cb.done{color:#3fb950;} .cb.wip{color:#d29922;} .cb.q{color:var(--accent);}
-ul{padding-left:1.4em;} li{margin:.2em 0;}
+ul,ol{padding-left:1.4em;} li{margin:.2em 0;}
 section{scroll-margin-top:20px;}
 </style></head>
 <body><div class="layout">
