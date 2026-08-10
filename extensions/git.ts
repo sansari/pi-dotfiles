@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -74,6 +74,146 @@ function inferDescription(status: string): string {
 
   const named = files.slice(0, 3).map(humanizePath).join(", ");
   return files.length > 3 ? `Updated ${named}, and related files.` : `Updated ${named}.`;
+}
+
+function textFromContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part: any) => {
+      if (typeof part?.text === "string") return part.text;
+      if (typeof part?.thinking === "string") return part.thinking;
+      if (part?.type === "toolCall") return `tool:${part.name ?? "unknown"} ${JSON.stringify(part.arguments ?? {})}`;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function sessionTranscript(ctx: ExtensionContext, maxEntries = 90): string {
+  try {
+    const entries = (ctx.sessionManager.getEntries() as any[]).slice(-maxEntries);
+    return entries
+      .map((entry) => {
+        const message = entry?.message;
+        if (!message?.role) return "";
+        const text = textFromContent(message.content).replace(/\s+/g, " ").trim();
+        if (!text) return "";
+        return `${message.role}: ${text}`;
+      })
+      .filter(Boolean)
+      .join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function extractShareUrl(text: string, explicit?: string): string | undefined {
+  if (explicit) return explicit;
+  return text.match(/https:\/\/gist\.github\.com\/\S+/)?.[0]?.replace(/[)>\].,]+$/, "");
+}
+
+function sentenceFragments(text: string, patterns: RegExp[], limit = 3): string[] {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const hits: string[] = [];
+  for (const line of lines) {
+    if (!patterns.some((pattern) => pattern.test(line))) continue;
+    const cleaned = line
+      .replace(/^(user|assistant|toolResult):\s*/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (cleaned.length < 12) continue;
+    hits.push(cleaned.length > 160 ? `${cleaned.slice(0, 157)}…` : cleaned);
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
+function inferSessionDescription(status: string, ctx: ExtensionContext, explicitShareUrl?: string): string {
+  const base = inferDescription(status).replace(/[.!?]+$/, "");
+  const transcript = sessionTranscript(ctx);
+  if (!transcript) return `${base}.`;
+
+  const goals = sentenceFragments(transcript, [/^user:/i, /\b(want|need|bug|fix|modify|change|commit|push|verify|test|implement)\b/i], 3);
+  const learnings = sentenceFragments(transcript, [/\b(not working|bug|failed|fail|slow|instead|better way|learn|found|root cause|verified)\b/i], 3);
+  const shareUrl = extractShareUrl(transcript, explicitShareUrl);
+
+  const details = [
+    `${base}.`,
+    goals.length ? `Session context: ${goals.join("; ")}.` : undefined,
+    learnings.length ? `Tried/learned: ${learnings.join("; ")}.` : undefined,
+    shareUrl ? `Session share: ${shareUrl}` : undefined,
+  ].filter(Boolean) as string[];
+
+  return details.join("\n");
+}
+
+function learningSuggestionsFromSession(text: string): Array<{ title: string; entry: string }> {
+  const lower = text.toLowerCase();
+  const suggestions: Array<{ title: string; entry: string }> = [];
+
+  if (lower.includes("really slow") && lower.includes("test") && lower.includes("live")) {
+    suggestions.push({
+      title: "Use quiet fast mode for live workflow testing",
+      entry: "When asked to test a workflow live, use quiet fast mode: give one upfront testing note, batch automation, avoid step-by-step narration, and report only blockers plus final results.",
+    });
+  }
+
+  if ((lower.includes("not working") || lower.includes("bug")) && lower.includes("verify")) {
+    suggestions.push({
+      title: "Reproduce UI bugs with state plus visual proof",
+      entry: "For UI behavior bugs, verify both the visible app state and the underlying persisted/runtime state; mock-only tests can miss event-ordering and lifecycle issues.",
+    });
+  }
+
+  if (lower.includes("agent learnings") || lower.includes("agents.md")) {
+    suggestions.push({
+      title: "Ask before writing agent memory",
+      entry: "Do not add workflow learnings to AGENTS.md automatically; propose the concise learning and ask whether it belongs in the project AGENTS.md, global AGENTS.md, or nowhere.",
+    });
+  }
+
+  return suggestions;
+}
+
+function appendAgentLearning(filePath: string, entry: string): void {
+  const header = "## Agent Learnings";
+  const bullet = `- ${entry}`;
+  const existing = existsSync(filePath) ? readFileSync(filePath, "utf-8") : "";
+  if (existing.includes(bullet)) return;
+  if (!existing.trim()) {
+    writeFileSync(filePath, `${header}\n\n${bullet}\n`);
+    return;
+  }
+  if (existing.includes(header)) {
+    writeFileSync(filePath, existing.replace(header, `${header}\n\n${bullet}`));
+    return;
+  }
+  appendFileSync(filePath, `\n${header}\n\n${bullet}\n`);
+}
+
+async function maybePromptAgentLearnings(root: string, ctx: ExtensionContext): Promise<string[]> {
+  if (!(ctx as any).hasUI) return [];
+  const transcript = sessionTranscript(ctx);
+  const suggestions = learningSuggestionsFromSession(transcript).slice(0, 3);
+  const added: string[] = [];
+
+  for (const suggestion of suggestions) {
+    const choice = await ctx.ui.select(
+      `Agent learning suggestion:\n\n${suggestion.entry}\n\nWhere should this go?`,
+      ["Skip", "Project AGENTS.md", "Global AGENTS.md"],
+      { timeout: 30000 },
+    );
+    if (choice === "Project AGENTS.md") {
+      appendAgentLearning(join(root, "AGENTS.md"), suggestion.entry);
+      added.push("project AGENTS.md");
+    } else if (choice === "Global AGENTS.md") {
+      appendAgentLearning(join(process.env.HOME ?? "", ".pi/agent/AGENTS.md"), suggestion.entry);
+      added.push("global AGENTS.md");
+    }
+  }
+
+  return added;
 }
 
 function commitSubject(category: ChangelogCategory, description: string): string {
@@ -224,7 +364,14 @@ async function handlePull(pi: ExtensionAPI, args: string, ctx: ExtensionContext)
 async function handlePush(pi: ExtensionAPI, args: string, ctx: ExtensionContext): Promise<void> {
   const root = await repoRoot(ctx.cwd);
   const noChangelog = /(?:^|\s)--no-changelog(?:\s|$)/.test(args);
-  const messageArg = args.replace(/(?:^|\s)--no-changelog(?:\s|$)/g, " ").trim();
+  const noLearnings = /(?:^|\s)--no-learnings(?:\s|$)/.test(args);
+  const shareMatch = args.match(/(?:^|\s)--share\s+(\S+)/);
+  const explicitShareUrl = shareMatch?.[1];
+  const messageArg = args
+    .replace(/(?:^|\s)--no-changelog(?:\s|$)/g, " ")
+    .replace(/(?:^|\s)--no-learnings(?:\s|$)/g, " ")
+    .replace(/(?:^|\s)--share\s+\S+/g, " ")
+    .trim();
 
   let status = await runGit(root, ["status", "--short"]);
   if (!status) {
@@ -233,9 +380,14 @@ async function handlePush(pi: ExtensionAPI, args: string, ctx: ExtensionContext)
   }
 
   const category = inferCategory(status);
-  const description = inferDescription(status);
+  const description = inferSessionDescription(status, ctx, explicitShareUrl);
   if (!noChangelog && existsSync(join(root, "CHANGELOG.md")) && !hasChangelogChange(status)) {
     addChangelogEntry(root, category, description);
+    status = await runGit(root, ["status", "--short"]);
+  }
+
+  const learningFiles = noLearnings ? [] : await maybePromptAgentLearnings(root, ctx);
+  if (learningFiles.length > 0) {
     status = await runGit(root, ["status", "--short"]);
   }
 
@@ -257,7 +409,8 @@ async function handlePush(pi: ExtensionAPI, args: string, ctx: ExtensionContext)
   const pushOutput = await runGit(root, ["push", "origin", "HEAD"]);
   ctx.ui.setStatus("git", "");
 
-  sendGitOutput(pi, "git push", "push", `Committed and pushed: ${subject}\n\n${truncate([commitOutput, pushOutput].filter(Boolean).join("\n"), 80)}`);
+  const learningNote = learningFiles.length ? `\n\nAgent learning added to: ${[...new Set(learningFiles)].join(", ")}` : "";
+  sendGitOutput(pi, "git push", "push", `Committed and pushed: ${subject}${learningNote}\n\n${truncate([commitOutput, pushOutput].filter(Boolean).join("\n"), 80)}`);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -273,7 +426,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("git", {
-    description: "Git helpers: /git status, /git diff [args], /git pull [base=main], /git push [message] [--no-changelog]",
+    description: "Git helpers: /git status, /git diff [args], /git pull [base=main], /git push [message] [--share <gist-url>] [--no-changelog] [--no-learnings]",
     handler: async (args, ctx) => {
       const [subcommand = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       try {
@@ -292,7 +445,7 @@ export default function (pi: ExtensionAPI) {
             await handlePush(pi, rest.join(" "), ctx);
             return;
           default:
-            sendGitOutput(pi, "git", "error", "Usage: /git status | /git diff [args] | /git pull [base=main] | /git push [message] [--no-changelog]");
+            sendGitOutput(pi, "git", "error", "Usage: /git status | /git diff [args] | /git pull [base=main] | /git push [message] [--share <gist-url>] [--no-changelog] [--no-learnings]");
         }
       } catch (error) {
         ctx.ui.setStatus("git", "");
