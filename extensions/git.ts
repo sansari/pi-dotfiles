@@ -374,8 +374,10 @@ async function runPrePushChecks(root: string, ctx: ExtensionContext): Promise<vo
   if (existsSync(join(root, "scripts", "test-unit.sh"))) {
     checks.push(["Running unit tests", join(root, "scripts", "test-unit.sh"), [], 65_000]);
   }
-  if (existsSync(join(root, "scripts", "test-ui.sh"))) {
-    checks.push(["Running UI tests", join(root, "scripts", "test-ui.sh"), [], undefined]);
+  if (existsSync(join(root, "scripts", "test-ui-related.sh"))) {
+    checks.push(["Running related UI tests", join(root, "scripts", "test-ui-related.sh"), [], 600_000]);
+  } else if (existsSync(join(root, "scripts", "test-ui.sh"))) {
+    checks.push(["Running UI tests", join(root, "scripts", "test-ui.sh"), [], 600_000]);
   }
   if (existsSync(join(root, ".2119.yml"))) {
     checks.push(["Running 2119 checks", "npx", ["rfc2119", "check"], undefined]);
