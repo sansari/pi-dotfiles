@@ -2,8 +2,8 @@
   "packages": [
     "npm:@demigodmode/pi-web-agent"
   ],
-  "lastChangelogVersion": "0.83.0",
-  "defaultProvider": "lmstudio",
+  "lastChangelogVersion": "0.84.1",
+  "defaultProvider": "openai-codex",
   "hideThinkingBlock": false,
   "theme": "dark",
   "warnings": {
@@ -15,6 +15,6 @@
   "followUpMode": "all",
   "steeringMode": "all",
   "quietStartup": true,
-  "defaultModel": "local-model",
+  "defaultModel": "gpt-5.6-luna",
   "defaultThinkingLevel": "medium"
 }
