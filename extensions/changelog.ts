@@ -26,50 +26,18 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function textFromContent(content: unknown): string {
-    if (typeof content === "string") return content;
-    if (!Array.isArray(content)) return "";
-    return content
-      .map((part: any) => typeof part?.text === "string" ? part.text : typeof part?.thinking === "string" ? part.thinking : "")
-      .filter(Boolean)
-      .join("\n");
-  }
+  function userFacingDescription(description: string): string {
+    const lines = description.trim().split("\n");
+    const sessionContextIndex = lines.findIndex((line) => /^\s*Session context:/i.test(line));
+    const sanitized = (sessionContextIndex === -1 ? lines : lines.slice(0, sessionContextIndex))
+      .join("\n")
+      .trim();
 
-  function sessionTranscript(ctx: any, maxEntries = 90): string {
-    try {
-      const entries = (ctx.sessionManager.getEntries() as any[]).slice(-maxEntries);
-      return entries
-        .map((entry) => {
-          const message = entry?.message;
-          if (!message?.role) return "";
-          const text = textFromContent(message.content).replace(/\s+/g, " ").trim();
-          return text ? `${message.role}: ${text}` : "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    } catch {
-      return "";
+    if (!sanitized) {
+      throw new Error("Changelog description must contain user-facing text");
     }
-  }
 
-  function extractShareUrl(text: string): string | undefined {
-    return text.match(/https:\/\/gist\.github\.com\/\S+/)?.[0]?.replace(/[)>\].,]+$/, "");
-  }
-
-  function sessionHints(ctx: any): string[] {
-    const transcript = sessionTranscript(ctx);
-    if (!transcript) return [];
-    const lines = transcript.split("\n").filter((line) => /\b(fix|change|modify|implement|verify|test|bug|not working|learn|found|root cause)\b/i.test(line));
-    const hints = lines.slice(-4).map((line) => line.replace(/^(user|assistant):\s*/i, "").slice(0, 180));
-    const shareUrl = extractShareUrl(transcript);
-    if (shareUrl) hints.push(`Session share: ${shareUrl}`);
-    return hints;
-  }
-
-  function enrichDescription(description: string, ctx: any): string {
-    const hints = sessionHints(ctx).filter((hint) => !description.includes(hint));
-    if (hints.length === 0) return description;
-    return `${description.trim()}\nSession context: ${hints.join("; ")}.`;
+    return sanitized;
   }
 
   // Helper: Get list of staged files (excluding changelog)
@@ -89,10 +57,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "update_changelog",
     label: "Update Changelog",
-    description: "Add a date-based entry to CHANGELOG.md for the current changes, using recent session/share history for context",
+    description: "Add a finalized, user-facing date-based entry to CHANGELOG.md for the current changes",
     promptGuidelines: [
       "Before pushing code changes, use update_changelog to document what changed in CHANGELOG.md",
-      "Generate changelog content from the recent session history, including any newly generated /share gist URL visible in the session, instead of relying only on commit/file lists",
+      "Before calling update_changelog, review recent session history and any new /share gist URL, then synthesize relevant discoveries into the finalized user-facing description instead of relying only on commits or file lists",
+      "Pass update_changelog only concise finalized changelog text; never include raw session context, tool output, or agent narration",
       "Use date-based changelog sections (`## YYYY-MM-DD`), not version or [Unreleased] sections",
       "Changelog entries should be concise, user-focused, and categorized (Added/Changed/Fixed/Removed)",
     ],
@@ -104,7 +73,7 @@ export default function (pi: ExtensionAPI) {
         Type.Literal("Removed"),
       ]),
       description: Type.String({
-        description: "Brief description of the change (can be multi-line)",
+        description: "Final user-facing description of the change (can be multi-line; no raw session context)",
       }),
     }),
 
@@ -135,7 +104,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
 
-        const description = enrichDescription(params.description, ctx);
+        const description = userFacingDescription(params.description);
 
         // Format the entry (handle multi-line descriptions)
         const entryLines = description
