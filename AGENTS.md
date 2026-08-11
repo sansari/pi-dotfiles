@@ -39,11 +39,11 @@ For non-trivial implementation work, complete the loop in this order before repo
 3. Review the implementation diff for correctness, architecture, race conditions, UI/UX regressions, error handling, and maintainability.
 4. Ask a fresh-context reviewer/subagent to review the implementation diff when available.
 5. Fix blocking review findings, or explicitly document why they are deferred.
-6. Update and run relevant non-UI automated tests first: focused unit, integration, process/lifecycle, and requirements evidence tests.
+6. Update and run relevant non-UI automated tests first: focused unit, integration, process/lifecycle, and requirements evidence tests. When running unit tests, use a 60-second timeout by default unless the user explicitly authorizes a longer run, and provide visible progress/feedback while the tests run rather than going silent.
 7. Run UI automation tests only at the final pre-push stage, after non-UI automated tests pass and any required user manual verification is complete.
 8. When preparing to push changes in a repository that uses 2119, run `npx rfc2119 check` immediately before the push.
 
-The implementation review is separate from 2119 requirement/test review. After implementing a feature or fix, run its focused relevant non-UI tests to verify the change. Do not run UI automation suites during iterative implementation or review churn; reserve them for the final pre-push gate after unit/integration checks and required manual verification. For ordinary local tasks, do not mark the task complete until verification, review, and focused non-UI tests are done, or any blocker is clearly reported. Do not run the full `rfc2119 check` suite merely to finish an individual task; reserve it for the pre-push gate.
+The implementation review is separate from 2119 requirement/test review. After implementing a feature or fix, run its focused relevant non-UI tests to verify the change. Unit-test runs should default to a 60-second timeout and should stream or periodically summarize visible progress; if a test run hits the timeout, stop immediately, inspect the hang/failure, and report the blocker instead of rerunning with a longer timeout without permission. Do not run UI automation suites during iterative implementation or review churn; reserve them for the final pre-push gate after unit/integration checks and required manual verification. For ordinary local tasks, do not mark the task complete until verification, review, and focused non-UI tests are done, or any blocker is clearly reported. Do not run the full `rfc2119 check` suite merely to finish an individual task; reserve it for the pre-push gate.
 
 ## Plans and specs
 
