@@ -37,17 +37,20 @@
 For non-trivial implementation work, complete the loop in this order before reporting completion:
 
 1. Make the requested change.
-2. Manually verify the change yourself where applicable, following the Visual Verification rules above.
+2. Manually/visually verify the change yourself where applicable, following the Visual Verification rules above; if the change requires the user's manual verification, explicitly pause for that verification.
 3. Review the implementation diff for correctness, architecture, race conditions, UI/UX regressions, error handling, and maintainability.
 4. Ask a fresh-context reviewer/subagent to review the implementation diff when available.
 5. Fix blocking review findings, or explicitly document why they are deferred.
-6. Update and run relevant automated tests.
-7. When preparing to push changes in a repository that uses 2119, run `npx rfc2119 check` immediately before the push.
+6. Update and run relevant non-UI automated tests first: focused unit, integration, process/lifecycle, and requirements evidence tests.
+7. Run UI automation tests only at the final pre-push stage, after non-UI automated tests pass and any required user manual verification is complete.
+8. When preparing to push changes in a repository that uses 2119, run `npx rfc2119 check` immediately before the push.
 
-The implementation review is separate from 2119 requirement/test review. After implementing a feature or fix, run its focused relevant tests to verify the change. For ordinary local tasks, do not mark the task complete until verification, review, and those focused tests are done, or any blocker is clearly reported. Do not run the full `rfc2119 check` suite merely to finish an individual task; reserve it for the pre-push gate.
+The implementation review is separate from 2119 requirement/test review. After implementing a feature or fix, run its focused relevant non-UI tests to verify the change. Do not run UI automation suites during iterative implementation or review churn; reserve them for the final pre-push gate after unit/integration checks and required manual verification. For ordinary local tasks, do not mark the task complete until verification, review, and focused non-UI tests are done, or any blocker is clearly reported. Do not run the full `rfc2119 check` suite merely to finish an individual task; reserve it for the pre-push gate.
 
-## Plans
+## Plans and specs
 
+- When writing any plan, spec, requirements document, acceptance criteria, or test plan, keep the requirement set deliberately coarse for small UX/product features: prefer a handful of broad, observable requirements that match user-visible behavior over many narrowly sliced micro-requirements. Split a requirement only when the obligations are independently high-risk, independently observable, or require materially different test evidence; do not create separate requirements just because implementation has separate steps.
+- Before treating a spec as ready, review whether it is appropriately coarse as well as outcome-stated and testable. If a feature that feels small needs many requirements, stop and ask whether the spec should be collapsed before implementation.
 - Whenever you write or substantially revise a plan (milestone plans, implementation plans, specs, design docs, etc.), also generate a rendered HTML version of it and open it for the user to review, in addition to the markdown source.
 - Prefer a small reusable markdown-to-HTML script/generator per project (check for an existing one, e.g. a `build-*-html.mjs`-style script, before writing a new one) over one-off throwaway conversions, so plans stay easy to regenerate as they're revised.
 - After generating the HTML, open it (e.g. via `open <file>` on macOS) so it's actually visible, not just written to disk.
