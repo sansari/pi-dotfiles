@@ -21,6 +21,11 @@
 - AppleScript via `System Events` (window bounds, activation, clicking) commonly hits `-1743 Not authorized to send Apple events` in this environment and individual apps rarely expose window bounds via their own default Standard Suite either — don't rely on it for locating windows; use the `CGWindowListCopyWindowInfo` approach above instead, which only needs Screen Recording permission, not Automation permission.
 - Crop/zoom into a specific region of a captured screenshot with `ffmpeg -y -i in.png -vf "crop=W:H:X:Y" -frames:v 1 out.png` (note: needs `-frames:v 1`, plain `ffmpeg... crop... out.png` errors on a single still image without it).
 
+## UI theme colors
+
+- Reuse platform semantic colors and the project's existing centralized theme tokens instead of embedding raw color values in feature views or components.
+- When no existing color token expresses the intended semantic role, extend the centralized theme first, then reference that token from the feature code.
+
 ## Communication
 
 - Keep tool-step narration terse: one short sentence such as “Rebuilding and inspecting.” Avoid long status explanations unless the user asks for details.
