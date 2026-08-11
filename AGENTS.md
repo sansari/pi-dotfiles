@@ -22,6 +22,7 @@
 ## Communication
 
 - Keep tool-step narration terse: one short sentence such as “Rebuilding and inspecting.” Avoid long status explanations unless the user asks for details.
+- When dispatching batched reviewer/subagent work, report progress between batches as `N/T complete, P pending, F failures so far`, with a short list of blocking failures.
 
 ## Reliable hooks and effects
 
