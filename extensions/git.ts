@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Box, Text } from "@earendil-works/pi-tui";
 import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -15,13 +15,17 @@ type GitOutputDetails = {
 };
 
 async function runGit(cwd: string, args: string[], maxBuffer = 1024 * 1024 * 16): Promise<string> {
+  return runCommand(cwd, "git", args, maxBuffer);
+}
+
+async function runCommand(cwd: string, command: string, args: string[], maxBuffer = 1024 * 1024 * 16, timeout?: number): Promise<string> {
   try {
-    const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer });
+    const { stdout } = await execFileAsync(command, args, { cwd, maxBuffer, timeout });
     return String(stdout ?? "").trim();
   } catch (error) {
     const err = error as Error & { stdout?: string; stderr?: string };
     const output = [err.stdout, err.stderr].filter(Boolean).join("\n").trim();
-    throw new Error(output || err.message || `git ${args.join(" ")} failed`);
+    throw new Error(output || err.message || `${command} ${args.join(" ")} failed`);
   }
 }
 
@@ -361,6 +365,126 @@ async function handlePull(pi: ExtensionAPI, args: string, ctx: ExtensionContext)
   }
 }
 
+async function runPrePushChecks(root: string, ctx: ExtensionContext): Promise<void> {
+  const checks: Array<[string, string, string[], number | undefined]> = [
+    ["Checking whitespace", "git", ["diff", "--check"], 30_000],
+    ["Checking staged whitespace", "git", ["diff", "--cached", "--check"], 30_000],
+  ];
+
+  if (existsSync(join(root, "scripts", "test-unit.sh"))) {
+    checks.push(["Running unit tests", join(root, "scripts", "test-unit.sh"), [], 65_000]);
+  }
+  if (existsSync(join(root, "scripts", "test-ui.sh"))) {
+    checks.push(["Running UI tests", join(root, "scripts", "test-ui.sh"), [], undefined]);
+  }
+  if (existsSync(join(root, ".2119.yml"))) {
+    checks.push(["Running 2119 checks", "npx", ["rfc2119", "check"], undefined]);
+  }
+
+  for (const [label, command, args, timeout] of checks) {
+    ctx.ui.setStatus("git", `${label}…`);
+    await runCommand(root, command, args, 1024 * 1024 * 16, timeout);
+  }
+}
+
+async function handleShipIt(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  const root = await repoRoot(ctx.cwd);
+  const branch = await runGit(root, ["branch", "--show-current"]);
+
+  if (!branch || branch === "main" || branch === "master") {
+    sendGitOutput(pi, "/shipit", "error", "Shipit requires a non-main feature branch.");
+    return;
+  }
+
+  try {
+    await runPrePushChecks(root, ctx);
+    const currentStatus = await runGit(root, ["status", "--short"]);
+    if (currentStatus) {
+      ctx.ui.setStatus("git", "Checks passed; preparing commit…");
+      await handlePush(pi, "", ctx);
+    }
+  } catch (error) {
+    ctx.ui.setStatus("git", "");
+    sendGitOutput(pi, "/shipit checks or push failed", "error", error instanceof Error ? error.message : String(error));
+    return;
+  }
+
+  try {
+    ctx.ui.setStatus("git", "Opening GitHub pull request…");
+    await runCommand(root, "gh", ["--version"]);
+    await runCommand(root, "gh", ["auth", "status"]);
+    let pullRequest: { number: number; url: string; baseRefName: string; state: string };
+    try {
+      pullRequest = JSON.parse(await runCommand(root, "gh", ["pr", "view", "--json", "number,url,baseRefName,state"]));
+    } catch (viewError) {
+      try {
+        await runCommand(root, "gh", ["pr", "create", "--base", "main", "--head", branch, "--fill"]);
+      } catch (createError) {
+        const viewMessage = viewError instanceof Error ? viewError.message : String(viewError);
+        const createMessage = createError instanceof Error ? createError.message : String(createError);
+        throw new Error(`No existing PR could be viewed (${viewMessage}) and PR creation failed (${createMessage}).`);
+      }
+      pullRequest = JSON.parse(await runCommand(root, "gh", ["pr", "view", "--json", "number,url,baseRefName,state"]));
+    }
+
+    if (pullRequest.baseRefName !== "main") {
+      throw new Error(`Pull request #${pullRequest.number} targets ${pullRequest.baseRefName}, not main.`);
+    }
+    if (pullRequest.state !== "OPEN") {
+      throw new Error(`Pull request #${pullRequest.number} is ${pullRequest.state}, not open.`);
+    }
+
+    ctx.ui.setStatus("git", `Waiting for CI on PR #${pullRequest.number}…`);
+    await runCommand(root, "gh", ["pr", "checks", String(pullRequest.number), "--watch"]);
+
+    ctx.ui.setStatus("git", "");
+    const shouldMerge = (ctx as any).hasUI && await ctx.ui.confirm(
+      "CI passed",
+      `CI passed for PR #${pullRequest.number}. Merge into main and delete the remote branch?\n\n${pullRequest.url}`,
+    );
+    if (!shouldMerge) {
+      sendGitOutput(pi, "/shipit ready", "push", `CI passed for PR #${pullRequest.number}; merge cancelled or unavailable without UI.\n\n${pullRequest.url}`);
+      return;
+    }
+
+    ctx.ui.setStatus("git", `Merging PR #${pullRequest.number}…`);
+    const subject = await runGit(root, ["log", "-1", "--pretty=%s"]);
+    await runCommand(root, "gh", [
+      "pr", "merge", String(pullRequest.number), "--squash", "--delete-branch",
+      "--subject", subject || `Merge ${branch} into main`, "--body", "",
+    ]);
+
+    const merged = JSON.parse(await runCommand(root, "gh", ["pr", "view", String(pullRequest.number), "--json", "number,url,baseRefName,state,mergedAt"]));
+    if (merged.state !== "MERGED" || !merged.mergedAt || merged.baseRefName !== "main") {
+      throw new Error(`GitHub did not confirm PR #${pullRequest.number} merged into main.`);
+    }
+
+    const closeWorktree = (ctx as any).hasUI && await ctx.ui.confirm(
+      "Pull request merged",
+      `PR #${pullRequest.number} merged into main. Remove and close this worktree?\n\n${merged.url ?? pullRequest.url}`,
+    );
+    if (!closeWorktree) {
+      sendGitOutput(pi, "/shipit complete", "push", `PR #${pullRequest.number} merged into main. Worktree kept at ${root}.`);
+      return;
+    }
+
+    const parent = dirname(root);
+    const worktrees = await runGit(parent, ["worktree", "list", "--porcelain"]);
+    if (!worktrees.split("\n").some((line) => line === `worktree ${root}`)) {
+      sendGitOutput(pi, "/shipit complete", "push", `PR #${pullRequest.number} merged into main. ${root} is not listed as a removable worktree.`);
+      return;
+    }
+
+    process.chdir(parent);
+    await runGit(parent, ["worktree", "remove", root]);
+    sendGitOutput(pi, "/shipit complete", "push", `PR #${pullRequest.number} merged into main and worktree removed: ${root}`);
+    ctx.shutdown();
+  } catch (error) {
+    ctx.ui.setStatus("git", "");
+    sendGitOutput(pi, "/shipit GitHub workflow failed", "error", error instanceof Error ? error.message : String(error));
+  }
+}
+
 async function handlePush(pi: ExtensionAPI, args: string, ctx: ExtensionContext): Promise<void> {
   const root = await repoRoot(ctx.cwd);
   const noChangelog = /(?:^|\s)--no-changelog(?:\s|$)/.test(args);
@@ -423,6 +547,18 @@ export default function (pi: ExtensionAPI) {
     const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
     box.addChild(new Text(rendered, 0, 0));
     return box;
+  });
+
+  pi.registerCommand("shipit", {
+    description: "Run pre-push checks, then commit all changes and push",
+    handler: async (_args, ctx) => {
+      try {
+        await handleShipIt(pi, ctx);
+      } catch (error) {
+        ctx.ui.setStatus("git", "");
+        sendGitOutput(pi, "/shipit failed", "error", error instanceof Error ? error.message : String(error));
+      }
+    },
   });
 
   pi.registerCommand("git", {
