@@ -12,7 +12,6 @@ Personal [pi coding agent](https://pi.dev) configuration — extensions, setting
 │   ├── changelog.ts                 # Changelog update tool
 │   ├── html-report.ts               # html_report tool + /report command
 │   ├── web.ts                       # web_search / web_fetch tools
-│   ├── supacode/                    # Supacode CLI integration
 │   └── pi-web-agent/               # Web agent config (verbose mode)
 ├── settings.json                    # Theme, default model, installed packages
 ├── skills/                          # Global skills

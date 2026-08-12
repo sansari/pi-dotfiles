@@ -26,6 +26,20 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function userFacingDescription(description: string): string {
+    const lines = description.trim().split("\n");
+    const sessionContextIndex = lines.findIndex((line) => /^\s*Session context:/i.test(line));
+    const sanitized = (sessionContextIndex === -1 ? lines : lines.slice(0, sessionContextIndex))
+      .join("\n")
+      .trim();
+
+    if (!sanitized) {
+      throw new Error("Changelog description must contain user-facing text");
+    }
+
+    return sanitized;
+  }
+
   // Helper: Get list of staged files (excluding changelog)
   function getStagedFiles(): string[] {
     try {
@@ -43,9 +57,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "update_changelog",
     label: "Update Changelog",
-    description: "Add a date-based entry to CHANGELOG.md for the current changes",
+    description: "Add a finalized, user-facing date-based entry to CHANGELOG.md for the current changes",
     promptGuidelines: [
       "Before pushing code changes, use update_changelog to document what changed in CHANGELOG.md",
+      "Before calling update_changelog, review recent session history and any new /share gist URL, then synthesize relevant discoveries into the finalized user-facing description instead of relying only on commits or file lists",
+      "Pass update_changelog only concise finalized changelog text; never include raw session context, tool output, or agent narration",
       "Use date-based changelog sections (`## YYYY-MM-DD`), not version or [Unreleased] sections",
       "Changelog entries should be concise, user-focused, and categorized (Added/Changed/Fixed/Removed)",
     ],
@@ -57,7 +73,7 @@ export default function (pi: ExtensionAPI) {
         Type.Literal("Removed"),
       ]),
       description: Type.String({
-        description: "Brief description of the change (can be multi-line)",
+        description: "Final user-facing description of the change (can be multi-line; no raw session context)",
       }),
     }),
 
@@ -88,8 +104,10 @@ export default function (pi: ExtensionAPI) {
           }
         }
 
+        const description = userFacingDescription(params.description);
+
         // Format the entry (handle multi-line descriptions)
-        const entryLines = params.description
+        const entryLines = description
           .split("\n")
           .map((line, idx) => {
             if (idx === 0) return `- ${line}`;
@@ -144,7 +162,7 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: `✓ Added to CHANGELOG.md under ${today} / ${params.category}:\n${params.description}`,
+              text: `✓ Added to CHANGELOG.md under ${today} / ${params.category}:\n${description}`,
             },
           ],
         };
@@ -173,7 +191,7 @@ export default function (pi: ExtensionAPI) {
           return {
             message: {
               customType: "changelog-reminder",
-              content: `⚠️  Staged changes without changelog update:\n${files.slice(0, 5).join("\n")}${files.length > 5 ? `\n... and ${files.length - 5} more` : ""}\n\nConsider using update_changelog before pushing. It will add entries under today's date section (## YYYY-MM-DD).`,
+              content: `⚠️  Staged changes without changelog update:\n${files.slice(0, 5).join("\n")}${files.length > 5 ? `\n... and ${files.length - 5} more` : ""}\n\nConsider using update_changelog before pushing. Base the entry on recent session/share history, not only commits. It will add entries under today's date section (## YYYY-MM-DD).`,
               display: true,
             },
           };
