@@ -52,3 +52,9 @@ The implementation review is separate from 2119 requirement/test review. After i
 - Before treating a spec as ready, check that requirements are outcome-stated, testable, and not over-sliced.
 - When writing or substantially revising plans/specs/design docs, generate and open an HTML version; prefer a reusable project generator when one exists.
 - Follow project conventions for locations and naming restrictions.
+
+## Specialist Subagent Routing
+
+- Delegate planning, research, and substantial report-generation work to the global `planner` subagent.
+- Delegate implementation/code reviews to the global `code-reviewer` subagent. Do not review your own implementation in the same context when this specialist is available.
+- Use the active agent for direct implementation and ordinary conversation. The specialist model selection is owned by each agent definition, not the active session default.
