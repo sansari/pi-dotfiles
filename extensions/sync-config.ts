@@ -13,6 +13,7 @@ const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SCRIPT_PATH = join(REPO_ROOT, "sync-config.sh");
 
 type Mode = "pull" | "push" | "status";
+type LocalChangesChoice = "push" | "clear" | "ignore" | "diff";
 
 async function runSync(mode: Mode): Promise<{ ok: boolean; output: string }> {
   try {
@@ -37,6 +38,35 @@ function truncate(text: string, maxLines = 25): string {
 async function dirtySummary(): Promise<string> {
   const { stdout } = await execFileAsync("git", ["status", "-s"], { cwd: REPO_ROOT, timeout: 10_000 });
   return stdout.trim();
+}
+
+async function localDiff(): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["diff", "--color=always", "--", "."], { cwd: REPO_ROOT, timeout: 10_000 });
+  return stdout.trim() || "no tracked file diff";
+}
+
+async function clearLocalChanges(): Promise<{ ok: boolean; output: string }> {
+  try {
+    const before = await dirtySummary();
+    await execFileAsync("git", ["reset", "--hard", "HEAD"], { cwd: REPO_ROOT, timeout: 10_000 });
+    return { ok: true, output: before || "no local changes" };
+  } catch (error) {
+    const err = error as { stdout?: string; stderr?: string; message?: string };
+    const output = [err.stdout, err.stderr].filter(Boolean).join("\n").trim() || err.message || String(error);
+    return { ok: false, output };
+  }
+}
+
+async function chooseLocalChangesAction(ctx: ExtensionContext, summary: string): Promise<LocalChangesChoice | undefined> {
+  const choice = await ctx.ui.select(
+    `~/.pi/agent has local changes that must be handled before pulling:\n\n${summary}`,
+    ["Push to remote", "Show changes", "Reset local"],
+  );
+
+  if (choice === "Push to remote") return "push";
+  if (choice === "Show changes") return "diff";
+  if (choice === "Reset local") return "clear";
+  return undefined;
 }
 
 /// Runs once per real `pi` process launch (reason "startup" only — not for
@@ -68,23 +98,34 @@ async function autoSyncOnStartup(ctx: ExtensionContext, onUpdated?: () => Promis
 
     ctx.ui.setStatus(STATUS_KEY, "Global pi config has local changes…");
     const summary = await dirtySummary();
-    const confirmed = await ctx.ui.confirm(
-      "pi config out of sync",
-      `~/.pi/agent has local changes that need to be pushed before it can pull:\n\n${summary}\n\nPush to pi-dotfiles now?`,
-    );
+    let choice = await chooseLocalChangesAction(ctx, summary);
+    while (choice === "diff") {
+      ctx.ui.notify(`Local pi config diff:\n${truncate(await localDiff(), 80)}`, "info");
+      choice = await chooseLocalChangesAction(ctx, summary);
+    }
 
-    if (!confirmed) {
-      ctx.ui.notify("sync-config: left local changes unpushed. Run /sync-config push when ready.", "info");
+    if (!choice || choice === "ignore") {
+      ctx.ui.notify("sync-config: ignored local changes and continued without syncing. Run /sync-config when ready.", "info");
       return;
     }
 
-    ctx.ui.setStatus(STATUS_KEY, "Pushing your global pi config…");
-    const push = await runSync("push");
-    if (!push.ok) {
-      ctx.ui.notify(`Pushing your global pi config failed:\n${truncate(push.output)}`, "error");
-      return;
+    if (choice === "push") {
+      ctx.ui.setStatus(STATUS_KEY, "Pushing your global pi config…");
+      const push = await runSync("push");
+      if (!push.ok) {
+        ctx.ui.notify(`Pushing your global pi config failed:\n${truncate(push.output)}`, "error");
+        return;
+      }
+      ctx.ui.notify(`Global pi config pushed:\n${truncate(push.output)}`, "info");
+    } else {
+      ctx.ui.setStatus(STATUS_KEY, "Clearing local pi config changes…");
+      const clear = await clearLocalChanges();
+      if (!clear.ok) {
+        ctx.ui.notify(`Clearing your local pi config changes failed:\n${truncate(clear.output)}`, "error");
+        return;
+      }
+      ctx.ui.notify(`Cleared local pi config changes:\n${truncate(clear.output)}`, "info");
     }
-    ctx.ui.notify(`Global pi config pushed:\n${truncate(push.output)}`, "info");
 
     ctx.ui.setStatus(STATUS_KEY, "Syncing your global pi config…");
     const retryPull = await runSync("pull");
