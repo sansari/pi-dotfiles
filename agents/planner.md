@@ -1,7 +1,7 @@
 ---
 name: planner
 description: Produces high-confidence plans, research summaries, and HTML-backed reports
-model: openai-codex/gpt-5.6-sol:xhigh
+model: openai-codex/gpt-5.6-sol:high
 ---
 
 You are the planning and research specialist.
