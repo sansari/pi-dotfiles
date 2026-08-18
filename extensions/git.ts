@@ -1,8 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -365,6 +365,112 @@ async function handlePull(pi: ExtensionAPI, args: string, ctx: ExtensionContext)
   }
 }
 
+function issueSlug(prompt: string): string {
+  const slug = prompt
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/g, "");
+  return slug || "task";
+}
+
+async function defaultBranch(root: string): Promise<string> {
+  const remoteHead = await runGit(root, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]).catch(() => "");
+  return remoteHead.startsWith("origin/") ? remoteHead.slice("origin/".length) : "main";
+}
+
+async function handleStart(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const prompt = args.trim();
+  if (!prompt) {
+    sendGitOutput(pi, "/start", "error", "Usage: /start <short issue description>");
+    return;
+  }
+  if (ctx.mode !== "tui") {
+    sendGitOutput(pi, "/start", "error", "/start requires an interactive Pi session so it can switch into the new worktree.");
+    return;
+  }
+
+  const root = await repoRoot(ctx.cwd);
+  const status = await runGit(root, ["status", "--short"]);
+  if (status) {
+    sendGitOutput(pi, "/start", "error", "Commit, stash, or discard current changes before starting a new worktree.");
+    return;
+  }
+
+  let issueUrl: string | undefined;
+  let worktree: string | undefined;
+  let switchAttempted = false;
+  try {
+    ctx.ui.setStatus("git", "Checking GitHub authentication…");
+    await runCommand(root, "gh", ["--version"]);
+    await runCommand(root, "gh", ["auth", "status"]);
+
+    const base = await defaultBranch(root);
+    ctx.ui.setStatus("git", `Fetching origin/${base}…`);
+    await runGit(root, ["fetch", "origin", base]);
+    await runGit(root, ["rev-parse", "--verify", `origin/${base}`]);
+
+    ctx.ui.setStatus("git", "Creating GitHub issue…");
+    const issueOutput = await runCommand(root, "gh", ["issue", "create", "--title", prompt, "--body", prompt]);
+    issueUrl = issueOutput.match(/https?:\/\/\S+\/issues\/\d+/)?.[0];
+    if (!issueUrl) throw new Error(`GitHub did not return an issue URL: ${issueOutput || "no output"}`);
+
+    const issue = JSON.parse(await runCommand(root, "gh", ["issue", "view", issueUrl, "--json", "number,url,title"])) as {
+      number: number;
+      url: string;
+      title: string;
+    };
+    const branch = `issue-${issue.number}-${issueSlug(issue.title)}`;
+    const parent = dirname(root);
+    worktree = join(parent, `${basename(root)}-${branch}`);
+
+    if (existsSync(worktree)) throw new Error(`Worktree path already exists: ${worktree}`);
+    const branchExists = await runGit(root, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).then(() => true).catch(() => false);
+    if (branchExists) throw new Error(`Local branch already exists: ${branch}`);
+
+    ctx.ui.setStatus("git", `Creating worktree ${branch}…`);
+    await runGit(root, ["worktree", "add", "-b", branch, worktree, `origin/${base}`]);
+
+    const newSession = SessionManager.create(worktree);
+    const newSessionFile = newSession.getSessionFile();
+    if (!newSessionFile) throw new Error(`Could not create a Pi session for ${worktree}.`);
+    // Pi defers saving empty sessions; persist its public header so switchSession can recover this worktree cwd.
+    writeFileSync(newSessionFile, `${JSON.stringify(newSession.getHeader())}\n`, { flag: "wx" });
+
+    ctx.ui.setStatus("git", "Switching Pi into the new worktree…");
+    const handoff = [
+      `Start work on GitHub issue #${issue.number}: ${issue.title}`,
+      "",
+      `Issue: ${issue.url}`,
+      `Worktree: ${worktree}`,
+      `Branch: ${branch}`,
+      "",
+      "Implement the issue. First inspect the repository instructions and relevant code, then make and verify the change.",
+    ].join("\n");
+    switchAttempted = true;
+    const result = await ctx.switchSession(newSessionFile, {
+      withSession: async (replacementCtx) => {
+        replacementCtx.ui.notify(`Started issue #${issue.number} in ${worktree}`, "info");
+        await replacementCtx.sendUserMessage(handoff);
+      },
+    });
+    if (result.cancelled) {
+      ctx.ui.setStatus("git", "");
+      sendGitOutput(pi, "/start cancelled", "error", `Pi did not switch into ${worktree}. GitHub issue created: ${issue.url}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const issueNote = issueUrl ? `\n\nGitHub issue created: ${issueUrl}` : "";
+    const worktreeNote = worktree ? `\nWorktree retained: ${worktree}` : "";
+    if (switchAttempted) throw new Error(`${message}${issueNote}${worktreeNote}`);
+    ctx.ui.setStatus("git", "");
+    sendGitOutput(pi, "/start failed", "error", `${message}${issueNote}${worktreeNote}`);
+  }
+}
+
 async function runPrePushChecks(root: string, ctx: ExtensionContext): Promise<void> {
   const checks: Array<[string, string, string[], number | undefined]> = [
     ["Checking whitespace", "git", ["diff", "--check"], 30_000],
@@ -389,15 +495,16 @@ async function runPrePushChecks(root: string, ctx: ExtensionContext): Promise<vo
   }
 }
 
-async function handleShipIt(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+async function handleShip(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
   const root = await repoRoot(ctx.cwd);
   const branch = await runGit(root, ["branch", "--show-current"]);
 
   if (!branch || branch === "main" || branch === "master") {
-    sendGitOutput(pi, "/shipit", "error", "Shipit requires a non-main feature branch.");
+    sendGitOutput(pi, "/ship", "error", "/ship requires a non-main feature branch.");
     return;
   }
 
+  let shippedHead: string;
   try {
     await runPrePushChecks(root, ctx);
     const currentStatus = await runGit(root, ["status", "--short"]);
@@ -405,9 +512,10 @@ async function handleShipIt(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
       ctx.ui.setStatus("git", "Checks passed; preparing commit…");
       await handlePush(pi, "", ctx);
     }
+    shippedHead = await runGit(root, ["rev-parse", "HEAD"]);
   } catch (error) {
     ctx.ui.setStatus("git", "");
-    sendGitOutput(pi, "/shipit checks or push failed", "error", error instanceof Error ? error.message : String(error));
+    sendGitOutput(pi, "/ship checks or push failed", "error", error instanceof Error ? error.message : String(error));
     return;
   }
 
@@ -445,7 +553,7 @@ async function handleShipIt(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
       `CI passed for PR #${pullRequest.number}. Merge into main and delete the remote branch?\n\n${pullRequest.url}`,
     );
     if (!shouldMerge) {
-      sendGitOutput(pi, "/shipit ready", "push", `CI passed for PR #${pullRequest.number}; merge cancelled or unavailable without UI.\n\n${pullRequest.url}`);
+      sendGitOutput(pi, "/ship ready", "push", `CI passed for PR #${pullRequest.number}; merge cancelled or unavailable without UI.\n\n${pullRequest.url}`);
       return;
     }
 
@@ -466,24 +574,51 @@ async function handleShipIt(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
       `PR #${pullRequest.number} merged into main. Remove and close this worktree?\n\n${merged.url ?? pullRequest.url}`,
     );
     if (!closeWorktree) {
-      sendGitOutput(pi, "/shipit complete", "push", `PR #${pullRequest.number} merged into main. Worktree kept at ${root}.`);
+      sendGitOutput(pi, "/ship complete", "push", `PR #${pullRequest.number} merged into main. Worktree kept at ${root}.`);
       return;
     }
 
-    const parent = dirname(root);
-    const worktrees = await runGit(parent, ["worktree", "list", "--porcelain"]);
+    const worktrees = await runGit(root, ["worktree", "list", "--porcelain"]);
     if (!worktrees.split("\n").some((line) => line === `worktree ${root}`)) {
-      sendGitOutput(pi, "/shipit complete", "push", `PR #${pullRequest.number} merged into main. ${root} is not listed as a removable worktree.`);
+      sendGitOutput(pi, "/ship complete", "push", `PR #${pullRequest.number} merged into main. ${root} is not listed as a removable worktree.`);
+      return;
+    }
+    const cleanupRepo = worktrees
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+      .map((line) => line.slice("worktree ".length))
+      .find((path) => path !== root && existsSync(path));
+    if (!cleanupRepo) {
+      sendGitOutput(pi, "/ship complete", "push", `PR #${pullRequest.number} merged into main. No other checkout was available to safely remove this worktree: ${root}`);
       return;
     }
 
-    process.chdir(parent);
-    await runGit(parent, ["worktree", "remove", root]);
-    sendGitOutput(pi, "/shipit complete", "push", `PR #${pullRequest.number} merged into main and worktree removed: ${root}`);
+    const currentHead = await runGit(root, ["rev-parse", "HEAD"]);
+    if (currentHead !== shippedHead) {
+      sendGitOutput(pi, "/ship complete", "push", `PR #${pullRequest.number} merged into main. The local branch changed after shipping, so its worktree was kept: ${root}`);
+      return;
+    }
+
+    try {
+      process.chdir(cleanupRepo);
+      await runGit(cleanupRepo, ["worktree", "remove", root]);
+    } catch (error) {
+      process.chdir(root);
+      throw error;
+    }
+    try {
+      const localBranchExists = await runGit(cleanupRepo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).then(() => true).catch(() => false);
+      // The PR merge was confirmed above and the local HEAD still matches the shipped commit.
+      if (localBranchExists) await runGit(cleanupRepo, ["branch", "-D", branch]);
+      sendGitOutput(pi, "/ship complete", "push", `PR #${pullRequest.number} merged into main; removed worktree and local branch: ${root}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      sendGitOutput(pi, "/ship cleanup incomplete", "error", `PR #${pullRequest.number} merged and worktree removed, but local branch cleanup failed: ${message}`);
+    }
     ctx.shutdown();
   } catch (error) {
     ctx.ui.setStatus("git", "");
-    sendGitOutput(pi, "/shipit GitHub workflow failed", "error", error instanceof Error ? error.message : String(error));
+    sendGitOutput(pi, "/ship GitHub workflow failed", "error", error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -551,14 +686,21 @@ export default function (pi: ExtensionAPI) {
     return box;
   });
 
-  pi.registerCommand("shipit", {
-    description: "Run pre-push checks, then commit all changes and push",
+  pi.registerCommand("start", {
+    description: "Create a GitHub issue and worktree, then switch Pi into it",
+    handler: async (args, ctx) => {
+      await handleStart(pi, args, ctx);
+    },
+  });
+
+  pi.registerCommand("ship", {
+    description: "Run pre-push checks, create and merge a GitHub PR, then remove this worktree",
     handler: async (_args, ctx) => {
       try {
-        await handleShipIt(pi, ctx);
+        await handleShip(pi, ctx);
       } catch (error) {
         ctx.ui.setStatus("git", "");
-        sendGitOutput(pi, "/shipit failed", "error", error instanceof Error ? error.message : String(error));
+        sendGitOutput(pi, "/ship failed", "error", error instanceof Error ? error.message : String(error));
       }
     },
   });
