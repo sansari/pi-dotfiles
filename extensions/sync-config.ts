@@ -145,17 +145,7 @@ async function autoSyncOnStartup(ctx: ExtensionContext, onUpdated?: () => Promis
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
     if (event.reason !== "startup") return;
-    await autoSyncOnStartup(ctx, async () => {
-      pi.sendUserMessage("/sync-config-reload", { deliverAs: "followUp" });
-    });
-  });
-
-  pi.registerCommand("sync-config-reload", {
-    description: "Reload pi after sync-config updates global config",
-    handler: async (_args, ctx) => {
-      await ctx.reload();
-      return;
-    },
+    await autoSyncOnStartup(ctx);
   });
 
   pi.registerCommand("sync-config", {
