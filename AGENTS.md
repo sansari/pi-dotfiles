@@ -24,6 +24,10 @@
 - Keep tool-step narration terse: one short sentence such as “Rebuilding and inspecting.” Avoid long status explanations unless the user asks for details.
 - When dispatching batched reviewer/subagent work, report progress between batches as `N/T complete, P pending, F failures so far`, with a short list of blocking failures.
 
+## GitHub access
+
+- Always use the GitHub CLI (`gh`) to read, search, or modify GitHub resources; never use `web_fetch` or other browser/web-fetch tools for GitHub URLs.
+
 ## Reliable hooks and effects
 
 - Never use delay/sleep/debounce/polling as a substitute for an authoritative lifecycle or completion signal.
