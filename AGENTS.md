@@ -23,7 +23,11 @@
 ## Communication
 
 - Keep tool-step narration terse: one short sentence such as “Rebuilding and inspecting.” Avoid long status explanations unless the user asks for details.
-- When dispatching batched reviewer/subagent work, report progress between batches as `N/T complete, P pending, F failures so far`, with a short list of blocking failures.
+- When dispatching batched reviewer/subagent work (including `code-reviewer` and `requirements_review` runs with more than one task), report results as a compact per-item status list — one line per reviewer/task with its id, pass/fail/pending status, and a one-sentence summary — instead of pasting each subagent's full narrative output. Follow the list with `N/T complete, P pending, F failures so far` and a short list of blocking failures. Offer full per-item detail only if the user asks.
+
+## Report output locations
+
+- When calling `html_report`, write output under a system temp directory (e.g. `/tmp` or `mktemp -d`), never into a project's `research/`, `reports/`, or other tracked/gitignored-but-committable directory, unless the user explicitly asks for a repo-tracked report location.
 
 ## GitHub access
 
