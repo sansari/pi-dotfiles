@@ -6,6 +6,7 @@
 - For web UI, use Playwright and browse directly to the relevant local URL; assume local servers/browsing are available unless proven otherwise.
 - For CSS/HTML/layout/rendering changes, inspect the changed page and confirm the result.
 - If manual-only verification is required, pause and ask for it explicitly.
+- When a user names a pasted screenshot without a path, look in `~/Screenshots/` first.
 
 ### Native macOS apps (no browser available)
 
