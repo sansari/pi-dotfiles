@@ -16,5 +16,8 @@
   "steeringMode": "all",
   "quietStartup": true,
   "defaultModel": "gpt-5.6-sol",
-  "defaultThinkingLevel": "medium"
+  "defaultThinkingLevel": "medium",
+  "modelThinkingLevels": {
+    "openrouter/openai/gpt-5.6-sol": "high"
+  }
 }
