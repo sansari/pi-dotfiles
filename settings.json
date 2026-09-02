@@ -3,7 +3,7 @@
     "npm:@demigodmode/pi-web-agent"
   ],
   "lastChangelogVersion": "0.84.4",
-  "defaultProvider": "anthropic",
+  "defaultProvider": "openai-codex",
   "hideThinkingBlock": false,
   "theme": "dark",
   "warnings": {
@@ -15,6 +15,9 @@
   "followUpMode": "all",
   "steeringMode": "all",
   "quietStartup": true,
-  "defaultModel": "claude-sonnet-5",
-  "defaultThinkingLevel": "high"
+  "defaultModel": "gpt-5.6-sol",
+  "defaultThinkingLevel": "medium",
+  "modelThinkingLevels": {
+    "openrouter/openai/gpt-5.6-sol": "high"
+  }
 }
