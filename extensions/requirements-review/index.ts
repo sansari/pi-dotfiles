@@ -33,6 +33,12 @@ const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
+const DEFAULT_REQUIREMENTS_REVIEWER = "requirements-reviewer";
+const LEGACY_REQUIREMENTS_REVIEWER = "code-reviewer";
+
+function resolveRequirementsReviewer(agentName?: string): string {
+	return !agentName || agentName === LEGACY_REQUIREMENTS_REVIEWER ? DEFAULT_REQUIREMENTS_REVIEWER : agentName;
+}
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -428,13 +434,17 @@ async function runSingleAgent(
 }
 
 const TaskItem = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
+	agent: Type.Optional(
+		Type.String({ description: `Agent to invoke. Defaults to ${DEFAULT_REQUIREMENTS_REVIEWER}.` }),
+	),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
 
 const ChainItem = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
+	agent: Type.Optional(
+		Type.String({ description: `Agent to invoke. Defaults to ${DEFAULT_REQUIREMENTS_REVIEWER}.` }),
+	),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
@@ -449,10 +459,12 @@ const AgentScopeSchema = Type.Union([
 });
 
 const SubagentParams = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
+	agent: Type.Optional(
+		Type.String({ description: `Agent to invoke in single mode. Defaults to ${DEFAULT_REQUIREMENTS_REVIEWER}.` }),
+	),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
-	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
+	tasks: Type.Optional(Type.Array(TaskItem, { description: "Parallel review tasks; agent is optional." })),
+	chain: Type.Optional(Type.Array(ChainItem, { description: "Sequential review tasks; agent is optional." })),
 	agentScope: Type.Optional(AgentScopeSchema),
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
@@ -465,7 +477,8 @@ export default function (pi: ExtensionAPI) {
 		name: "requirements_review",
 		label: "Requirements Review",
 		description: [
-			"Run requirement-review subagents with isolated context and compact progress-oriented output.",
+			`Run requirement-review subagents with isolated context; ${DEFAULT_REQUIREMENTS_REVIEWER} is the default.`,
+			`Omitted agents and legacy ${LEGACY_REQUIREMENTS_REVIEWER} selections use ${DEFAULT_REQUIREMENTS_REVIEWER}; explicitly named alternatives remain available for audit diversity.`,
 			"Use parallel tasks for batches of 2119 review instruction files; expand the result for full reviewer output.",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
@@ -480,7 +493,7 @@ export default function (pi: ExtensionAPI) {
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
-			const hasSingle = Boolean(params.agent && params.task);
+			const hasSingle = Boolean(params.task);
 			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
 
 			const makeDetails =
@@ -507,9 +520,11 @@ export default function (pi: ExtensionAPI) {
 
 			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
 				const requestedAgentNames = new Set<string>();
-				if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
-				if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
-				if (params.agent) requestedAgentNames.add(params.agent);
+				if (params.chain)
+					for (const step of params.chain) requestedAgentNames.add(resolveRequirementsReviewer(step.agent));
+				if (params.tasks)
+					for (const t of params.tasks) requestedAgentNames.add(resolveRequirementsReviewer(t.agent));
+				if (params.task) requestedAgentNames.add(resolveRequirementsReviewer(params.agent));
 
 				const projectAgentsRequested = Array.from(requestedAgentNames)
 					.map((name) => agents.find((a) => a.name === name))
@@ -536,6 +551,7 @@ export default function (pi: ExtensionAPI) {
 
 				for (let i = 0; i < params.chain.length; i++) {
 					const step = params.chain[i];
+					const agentName = resolveRequirementsReviewer(step.agent);
 					const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
 
 					// Create update callback that includes all previous results
@@ -556,7 +572,7 @@ export default function (pi: ExtensionAPI) {
 					const result = await runSingleAgent(
 						ctx.cwd,
 						agents,
-						step.agent,
+						agentName,
 						taskWithContext,
 						step.cwd,
 						i + 1,
@@ -570,7 +586,7 @@ export default function (pi: ExtensionAPI) {
 					if (isError) {
 						const errorMsg = getResultOutput(result);
 						return {
-							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
+							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${agentName}): ${errorMsg}` }],
 							details: makeDetails("chain")(results),
 							isError: true,
 						};
@@ -601,7 +617,7 @@ export default function (pi: ExtensionAPI) {
 				// Initialize placeholder results
 				for (let i = 0; i < params.tasks.length; i++) {
 					allResults[i] = {
-						agent: params.tasks[i].agent,
+						agent: resolveRequirementsReviewer(params.tasks[i].agent),
 						agentSource: "unknown",
 						task: params.tasks[i].task,
 						exitCode: -1, // -1 = still running
@@ -628,7 +644,7 @@ export default function (pi: ExtensionAPI) {
 					const result = await runSingleAgent(
 						ctx.cwd,
 						agents,
-						t.agent,
+						resolveRequirementsReviewer(t.agent),
 						t.task,
 						t.cwd,
 						undefined,
@@ -666,11 +682,11 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			if (params.agent && params.task) {
+			if (params.task) {
 				const result = await runSingleAgent(
 					ctx.cwd,
 					agents,
-					params.agent,
+					resolveRequirementsReviewer(params.agent),
 					params.task,
 					params.cwd,
 					undefined,
@@ -716,7 +732,7 @@ export default function (pi: ExtensionAPI) {
 						"\n  " +
 						theme.fg("muted", `${i + 1}.`) +
 						" " +
-						theme.fg("accent", step.agent) +
+						theme.fg("accent", resolveRequirementsReviewer(step.agent)) +
 						theme.fg("dim", ` ${preview}`);
 				}
 				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
@@ -729,12 +745,12 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("muted", ` [${scope}]`);
 				for (const t of args.tasks.slice(0, 3)) {
 					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
-					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
+					text += `\n  ${theme.fg("accent", resolveRequirementsReviewer(t.agent))}${theme.fg("dim", ` ${preview}`)}`;
 				}
 				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
 				return new Text(text, 0, 0);
 			}
-			const agentName = args.agent || "...";
+			const agentName = args.task ? resolveRequirementsReviewer(args.agent) : "...";
 			const preview = args.task ? (args.task.length > 60 ? `${args.task.slice(0, 60)}...` : args.task) : "...";
 			let text =
 				theme.fg("toolTitle", theme.bold("requirements_review ")) +

@@ -23,7 +23,7 @@
 ## Communication
 
 - Keep tool-step narration terse: one short sentence such as “Rebuilding and inspecting.” Avoid long status explanations unless the user asks for details.
-- When dispatching batched reviewer/subagent work (including `code-reviewer` and `requirements_review` runs with more than one task), report results as a compact per-item status list — one line per reviewer/task with its id, pass/fail/pending status, and a one-sentence summary — instead of pasting each subagent's full narrative output. Follow the list with `N/T complete, P pending, F failures so far` and a short list of blocking failures. Offer full per-item detail only if the user asks.
+- When dispatching batched reviewer/subagent work (including `code-reviewer`, `requirements-reviewer`, and `requirements_review` runs with more than one task), report results as a compact per-item status list — one line per reviewer/task with its id, pass/fail/pending status, and a one-sentence summary — instead of pasting each subagent's full narrative output. Follow the list with `N/T complete, P pending, F failures so far` and a short list of blocking failures. Offer full per-item detail only if the user asks.
 
 ## Report output locations
 
@@ -64,5 +64,6 @@ With explicit user authorization for the branch or a defined cadence, create sma
 ## Specialist Subagent Routing
 
 - Delegate planning, research, and substantial report-generation work to the global `planner` subagent.
-- Use the global `code-reviewer` for risk-triggered independent review and mandatory 2119 review work.
+- Use the global `code-reviewer` for risk-triggered independent code review.
+- Use the global `requirements-reviewer` for fresh-context 2119 specification critiques and test-honesty judgment reviews; batch independent judgment files through `requirements_review`.
 - Use the active agent for direct implementation and ordinary conversation. The specialist model selection is owned by each agent definition, not the active session default.
