@@ -1,7 +1,7 @@
 ---
 name: requirements-reviewer
 description: Performs focused fresh-context 2119 requirement and test-honesty reviews
-model: anthropic/claude-sonnet-5:low
+model: openai-codex/gpt-6-luna:high
 tools: read, bash
 ---
 

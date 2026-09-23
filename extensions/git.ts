@@ -4,7 +4,7 @@ import { execFile, spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { applySimpleEnglish } from "./lib/plain-english.ts";
+import { formatIssueReportMarkdown, issueDescriptor, type GitHubIssue, type GitHubPullRequest } from "./lib/github-issues.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -13,26 +13,6 @@ type ChangelogCategory = "Added" | "Changed" | "Fixed" | "Removed";
 type GitOutputDetails = {
   title: string;
   kind: "status" | "diff" | "pull" | "push" | "issues" | "error";
-};
-
-type GitHubIssue = {
-  number: number;
-  title: string;
-  body: string;
-  state: "OPEN" | "CLOSED";
-  url: string;
-  updatedAt: string;
-  labels: Array<{ name: string }>;
-  assignees: Array<{ login: string }>;
-};
-
-type GitHubPullRequest = {
-  number: number;
-  body: string;
-  state: "OPEN" | "CLOSED" | "MERGED";
-  url: string;
-  updatedAt: string;
-  closingIssuesReferences: Array<{ number: number }>;
 };
 
 async function runGit(cwd: string, args: string[], maxBuffer = 1024 * 1024 * 16): Promise<string> {
@@ -353,58 +333,6 @@ async function handleDiff(pi: ExtensionAPI, args: string, ctx: ExtensionContext)
   sendGitOutput(pi, `git diff${parsedArgs.length ? ` ${parsedArgs.join(" ")}` : ""}`, "diff", diff ? truncate(diff) : "No diff.");
 }
 
-function cleanIssueText(text: string): string {
-  return applySimpleEnglish(text
-    .replace(/<!--[^]*?-->/g, " ")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/[*_~]/g, "")
-    .replace(/^[-+]\s+\[[ xX]\]\s*/gm, "")
-    .replace(/^[-+]\s+/gm, "")
-    .replace(/^#+\s+/gm, "")
-    .replace(/\s+/g, " "));
-}
-
-function bodySection(body: string, names: string[]): string | undefined {
-  const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  const match = body.match(new RegExp(`^#{1,6}\\s+(?:${escaped})\\s*\\r?\\n([\\s\\S]*?)(?=^#{1,6}\\s+|(?![\\s\\S]))`, "im"));
-  return match?.[1]?.trim();
-}
-
-function issueDetails(issue: GitHubIssue, pullRequests: GitHubPullRequest[]): string {
-  const linked = pullRequests
-    .filter((pull) => pull.closingIssuesReferences.some((reference) => reference.number === issue.number))
-    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-  const source = linked[0]?.body || issue.body;
-  const focused = bodySection(source, ["Summary", "Outcome", "What changed", "Changes"]);
-  const clean = cleanIssueText(focused || source)
-    .replace(/^(Summary|Outcome|What changed|Changes)\s*/i, "")
-    .trim();
-  if (clean) {
-    const clipped = clean.length <= 240 ? clean : `${clean.slice(0, 237).replace(/\s+\S*$/, "").trim()}…`;
-    return clipped.replace(/[.!?]+$/, "") + ".";
-  }
-  if (linked[0]) return `${linked[0].state === "MERGED" ? "Merged" : "Work is underway in"} PR #${linked[0].number}.`;
-  return issue.state === "CLOSED" ? "Completed and closed." : "Work is underway.";
-}
-
-function issueDescriptor(title: string): string {
-  const clean = cleanIssueText(title).replace(/[.!?]+$/, "");
-  return clean.length <= 72 ? clean : `${clean.slice(0, 69).replace(/\s+\S*$/, "").trim()}…`;
-}
-
-function issueBullet(issue: GitHubIssue, pullRequests: GitHubPullRequest[]): string {
-  return `- [${issueDescriptor(issue.title).replace(/[\[\]]/g, "")}](${issue.url}) -- ${issueDetails(issue, pullRequests)}`;
-}
-
-function isInProgress(issue: GitHubIssue, pullRequests: GitHubPullRequest[]): boolean {
-  if (issue.state !== "OPEN") return false;
-  const hasOpenPullRequest = pullRequests.some((pull) =>
-    pull.state === "OPEN" && pull.closingIssuesReferences.some((reference) => reference.number === issue.number));
-  const hasProgressLabel = issue.labels.some(({ name }) => /^(?:status:\s*)?in[- ]?progress$/i.test(name.trim()));
-  return hasOpenPullRequest || hasProgressLabel || issue.assignees.length > 0;
-}
-
 async function githubIssues(root: string): Promise<GitHubIssue[]> {
   const output = await runCommand(root, "gh", [
     "issue", "list", "--state", "all", "--limit", "100", "--json",
@@ -453,16 +381,7 @@ async function handleIssues(pi: ExtensionAPI, args: string, ctx: ExtensionContex
   }
 
   const pullRequests = await githubPullRequests(root);
-  const latestFirst = (left: GitHubIssue, right: GitHubIssue) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
-  const inProgress = issues.filter((issue) => isInProgress(issue, pullRequests)).sort(latestFirst);
-  const done = issues.filter((issue) => issue.state === "CLOSED").sort(latestFirst);
-  const markdown = [
-    "**In progress**",
-    inProgress.length > 0 ? inProgress.map((issue) => issueBullet(issue, pullRequests)).join("\n") : "- None",
-    "",
-    "**Done**",
-    done.length > 0 ? done.map((issue) => issueBullet(issue, pullRequests)).join("\n") : "- None",
-  ].join("\n");
+  const markdown = formatIssueReportMarkdown(issues, pullRequests);
 
   ctx.ui.setStatus("git", "Copying issue report…");
   await presentIssues(pi, ctx, "GitHub issues report", markdown);
