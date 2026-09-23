@@ -1,9 +1,10 @@
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { applySimpleEnglish } from "./lib/plain-english.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -11,7 +12,27 @@ type ChangelogCategory = "Added" | "Changed" | "Fixed" | "Removed";
 
 type GitOutputDetails = {
   title: string;
-  kind: "status" | "diff" | "pull" | "push" | "error";
+  kind: "status" | "diff" | "pull" | "push" | "issues" | "error";
+};
+
+type GitHubIssue = {
+  number: number;
+  title: string;
+  body: string;
+  state: "OPEN" | "CLOSED";
+  url: string;
+  updatedAt: string;
+  labels: Array<{ name: string }>;
+  assignees: Array<{ login: string }>;
+};
+
+type GitHubPullRequest = {
+  number: number;
+  body: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  url: string;
+  updatedAt: string;
+  closingIssuesReferences: Array<{ number: number }>;
 };
 
 async function runGit(cwd: string, args: string[], maxBuffer = 1024 * 1024 * 16): Promise<string> {
@@ -37,6 +58,21 @@ function truncate(text: string, maxLines = 240): string {
   const lines = text.split("\n");
   if (lines.length <= maxLines) return text;
   return [...lines.slice(0, maxLines), `… (${lines.length - maxLines} more lines)`].join("\n");
+}
+
+async function copyMarkdownToClipboard(text: string): Promise<void> {
+  const child = spawn("npx", ["--yes", "@slackfmt/cli@latest", "-f", "markdown"], {
+    stdio: ["pipe", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
+  child.stdin?.end(text);
+  await new Promise<void>((resolve, reject) => {
+    child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(stderr.trim() || `slackfmt exited with ${code}`)));
+    child.on("error", reject);
+  });
 }
 
 function changedFilesFromStatus(status: string): string[] {
@@ -282,6 +318,7 @@ function addChangelogEntry(root: string, category: ChangelogCategory, descriptio
 }
 
 function colorGitLine(line: string, theme: any): string {
+  if (line.startsWith("**In progress**") || line.startsWith("**Done**")) return theme.fg("accent", line);
   if (line.startsWith("diff --git") || line.startsWith("index ")) return theme.fg("muted", line);
   if (line.startsWith("+++ ") || line.startsWith("--- ")) return theme.fg("warning", line);
   if (line.startsWith("@@")) return theme.fg("accent", line);
@@ -314,6 +351,122 @@ async function handleDiff(pi: ExtensionAPI, args: string, ctx: ExtensionContext)
   const parsedArgs = args.trim().length > 0 ? args.trim().split(/\s+/) : [];
   const diff = await runGit(root, ["diff", ...parsedArgs], 1024 * 1024 * 32);
   sendGitOutput(pi, `git diff${parsedArgs.length ? ` ${parsedArgs.join(" ")}` : ""}`, "diff", diff ? truncate(diff) : "No diff.");
+}
+
+function cleanIssueText(text: string): string {
+  return applySimpleEnglish(text
+    .replace(/<!--[^]*?-->/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[*_~]/g, "")
+    .replace(/^[-+]\s+\[[ xX]\]\s*/gm, "")
+    .replace(/^[-+]\s+/gm, "")
+    .replace(/^#+\s+/gm, "")
+    .replace(/\s+/g, " "));
+}
+
+function bodySection(body: string, names: string[]): string | undefined {
+  const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const match = body.match(new RegExp(`^#{1,6}\\s+(?:${escaped})\\s*\\r?\\n([\\s\\S]*?)(?=^#{1,6}\\s+|(?![\\s\\S]))`, "im"));
+  return match?.[1]?.trim();
+}
+
+function issueDetails(issue: GitHubIssue, pullRequests: GitHubPullRequest[]): string {
+  const linked = pullRequests
+    .filter((pull) => pull.closingIssuesReferences.some((reference) => reference.number === issue.number))
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const source = linked[0]?.body || issue.body;
+  const focused = bodySection(source, ["Summary", "Outcome", "What changed", "Changes"]);
+  const clean = cleanIssueText(focused || source)
+    .replace(/^(Summary|Outcome|What changed|Changes)\s*/i, "")
+    .trim();
+  if (clean) {
+    const clipped = clean.length <= 240 ? clean : `${clean.slice(0, 237).replace(/\s+\S*$/, "").trim()}…`;
+    return clipped.replace(/[.!?]+$/, "") + ".";
+  }
+  if (linked[0]) return `${linked[0].state === "MERGED" ? "Merged" : "Work is underway in"} PR #${linked[0].number}.`;
+  return issue.state === "CLOSED" ? "Completed and closed." : "Work is underway.";
+}
+
+function issueDescriptor(title: string): string {
+  const clean = cleanIssueText(title).replace(/[.!?]+$/, "");
+  return clean.length <= 72 ? clean : `${clean.slice(0, 69).replace(/\s+\S*$/, "").trim()}…`;
+}
+
+function issueBullet(issue: GitHubIssue, pullRequests: GitHubPullRequest[]): string {
+  return `- [${issueDescriptor(issue.title).replace(/[\[\]]/g, "")}](${issue.url}) -- ${issueDetails(issue, pullRequests)}`;
+}
+
+function isInProgress(issue: GitHubIssue, pullRequests: GitHubPullRequest[]): boolean {
+  if (issue.state !== "OPEN") return false;
+  const hasOpenPullRequest = pullRequests.some((pull) =>
+    pull.state === "OPEN" && pull.closingIssuesReferences.some((reference) => reference.number === issue.number));
+  const hasProgressLabel = issue.labels.some(({ name }) => /^(?:status:\s*)?in[- ]?progress$/i.test(name.trim()));
+  return hasOpenPullRequest || hasProgressLabel || issue.assignees.length > 0;
+}
+
+async function githubIssues(root: string): Promise<GitHubIssue[]> {
+  const output = await runCommand(root, "gh", [
+    "issue", "list", "--state", "all", "--limit", "100", "--json",
+    "number,title,body,state,url,updatedAt,labels,assignees",
+  ]);
+  return JSON.parse(output) as GitHubIssue[];
+}
+
+async function githubPullRequests(root: string): Promise<GitHubPullRequest[]> {
+  const output = await runCommand(root, "gh", [
+    "pr", "list", "--state", "all", "--limit", "100", "--json",
+    "number,body,state,url,updatedAt,closingIssuesReferences",
+  ]);
+  return JSON.parse(output) as GitHubPullRequest[];
+}
+
+async function presentIssues(pi: ExtensionAPI, ctx: ExtensionContext, title: string, markdown: string): Promise<void> {
+  sendGitOutput(pi, title, "issues", markdown);
+  if (ctx.mode !== "tui") console.log(markdown);
+  await copyMarkdownToClipboard(markdown);
+  ctx.ui.notify("GitHub issues copied to clipboard with Slack formatting", "info");
+}
+
+async function handleIssues(pi: ExtensionAPI, args: string, ctx: ExtensionContext): Promise<void> {
+  const mode = args.trim().toLowerCase();
+  if (mode && mode !== "report") {
+    sendGitOutput(pi, "git issues", "error", "Usage: /git issues [report]");
+    return;
+  }
+
+  const root = await repoRoot(ctx.cwd);
+  ctx.ui.setStatus("git", "Loading GitHub issues…");
+  const issues = await githubIssues(root);
+
+  if (!mode) {
+    const open = issues
+      .filter((issue) => issue.state === "OPEN")
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+    const markdown = open.length > 0
+      ? open.map((issue) => `- [#${issue.number} ${issueDescriptor(issue.title)}](${issue.url})`).join("\n")
+      : "No open GitHub issues.";
+    ctx.ui.setStatus("git", "Copying issue list…");
+    await presentIssues(pi, ctx, "GitHub issues", markdown);
+    ctx.ui.setStatus("git", "");
+    return;
+  }
+
+  const pullRequests = await githubPullRequests(root);
+  const latestFirst = (left: GitHubIssue, right: GitHubIssue) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  const inProgress = issues.filter((issue) => isInProgress(issue, pullRequests)).sort(latestFirst);
+  const done = issues.filter((issue) => issue.state === "CLOSED").sort(latestFirst);
+  const markdown = [
+    "**In progress**",
+    inProgress.length > 0 ? inProgress.map((issue) => issueBullet(issue, pullRequests)).join("\n") : "- None",
+    "",
+    "**Done**",
+    done.length > 0 ? done.map((issue) => issueBullet(issue, pullRequests)).join("\n") : "- None",
+  ].join("\n");
+
+  ctx.ui.setStatus("git", "Copying issue report…");
+  await presentIssues(pi, ctx, "GitHub issues report", markdown);
+  ctx.ui.setStatus("git", "");
 }
 
 async function handlePull(pi: ExtensionAPI, args: string, ctx: ExtensionContext): Promise<void> {
@@ -706,7 +859,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("git", {
-    description: "Git helpers: /git status, /git diff [args], /git pull [base=main], /git push [message] [--share <gist-url>] [--no-changelog] [--no-learnings]",
+    description: "Git helpers: /git status, /git diff [args], /git issues [report], /git pull [base=main], /git push [message] [--share <gist-url>] [--no-changelog] [--no-learnings]",
     handler: async (args, ctx) => {
       const [subcommand = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       try {
@@ -718,6 +871,9 @@ export default function (pi: ExtensionAPI) {
           case "diff":
             await handleDiff(pi, rest.join(" "), ctx);
             return;
+          case "issues":
+            await handleIssues(pi, rest.join(" "), ctx);
+            return;
           case "pull":
             await handlePull(pi, rest.join(" "), ctx);
             return;
@@ -725,7 +881,7 @@ export default function (pi: ExtensionAPI) {
             await handlePush(pi, rest.join(" "), ctx);
             return;
           default:
-            sendGitOutput(pi, "git", "error", "Usage: /git status | /git diff [args] | /git pull [base=main] | /git push [message] [--share <gist-url>] [--no-changelog] [--no-learnings]");
+            sendGitOutput(pi, "git", "error", "Usage: /git status | /git diff [args] | /git issues [report] | /git pull [base=main] | /git push [message] [--share <gist-url>] [--no-changelog] [--no-learnings]");
         }
       } catch (error) {
         ctx.ui.setStatus("git", "");
