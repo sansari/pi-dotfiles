@@ -19,7 +19,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if ! repo_check="$(git rev-parse --is-inside-work-tree 2>&1)"; then
+  echo "error: unable to inspect git repository at $SCRIPT_DIR" >&2
+  printf '%s\n' "$repo_check" >&2
+  exit 1
+fi
+
+if [[ "$repo_check" != "true" ]]; then
   echo "error: $SCRIPT_DIR is not a git repository" >&2
   exit 1
 fi
