@@ -468,8 +468,26 @@ export default function (pi): void {
   if (ownerPid && ownerPid !== selfPid && isStatusOwnerAlive(ownerPid)) return
   process.env.ORCA_PI_STATUS_OWNED = selfPid
   resetPostQueue()
+  const piEventBus = (pi as { events?: { on?: (name: string, handler: (event: unknown) => void) => void } }).events
+  const lifecycleState = (piEventBus as { __orcaPiSubagents?: { active: Set<string>; exited?: Set<string>; waiting: boolean; onEvent?: (event: unknown, forcedStatus?: string) => void; listener?: (event: unknown) => void; onRunnerExit?: (event: unknown) => void; runnerExitListener?: (event: unknown) => void } } | undefined)?.__orcaPiSubagents ?? { active: new Set<string>(), waiting: false }
+  if (piEventBus) (piEventBus as { __orcaPiSubagents?: unknown }).__orcaPiSubagents = lifecycleState
+  if (piEventBus?.on && !(lifecycleState as { listener?: unknown }).listener) {
+    const listener = (event: unknown) => lifecycleState.onEvent?.(event)
+    lifecycleState.listener = listener
+    piEventBus.on('task:subagent:lifecycle', listener)
+    piEventBus.on('subagent:async-started', (event: unknown) => lifecycleState.onEvent?.(event, 'started'))
+    piEventBus.on('subagent:async-complete', (event: unknown) => lifecycleState.onEvent?.(event, 'completed'))
+  }
+  if (piEventBus?.on && !lifecycleState.runnerExitListener) {
+    const runnerExitListener = (event: unknown) => lifecycleState.onRunnerExit?.(event)
+    lifecycleState.runnerExitListener = runnerExitListener
+    piEventBus.on('subagent:process-terminal', runnerExitListener)
+  }
   pi.on('session_switch', (_event, ctx) => {
     if (!isOmpRuntime()) return
+    lifecycleState.active.clear()
+    lifecycleState.exited?.clear()
+    lifecycleState.waiting = false
     resetPostQueue()
     clearPendingAgentEndCheck()
     updateRuntimeOmpSessionMetadata(ctx)
@@ -572,6 +590,7 @@ export default function (pi): void {
   onStatus('agent_start', (_event, ctx) => {
     updateRuntimeOmpSessionMetadata(ctx)
     clearPendingAgentEndCheck()
+    lifecycleState.waiting = false
     runGeneration += 1
     piUiPromptDepth = 0
     piTurnInFlight = true
@@ -694,11 +713,41 @@ export default function (pi): void {
     pendingAgentEndCheck = null
     pendingAgentEndContext = null
   }
-
-  // Why: isIdle flips before agent_settled handlers run, so both paths
-  // share a guard instead of racing duplicate completion posts — one keyed on the
-  // generation of the run that ENDED, so a later run still reports its own end.
+  const RUNNER_EXIT_GRACE_MS = 2000
+  let runnerExitCheck: ReturnType<typeof setTimeout> | null = null
+  lifecycleState.onEvent = (event: unknown, forcedStatus?: string): void => {
+    if (!event || typeof event !== 'object') return
+    const record = event as { id?: unknown; runId?: unknown }
+    const id = typeof record.id === 'string' && record.id ? record.id : typeof record.runId === 'string' ? record.runId : ''
+    const status = forcedStatus ?? (event as { status?: unknown }).status
+    if (!id) return
+    if (status === 'started') { lifecycleState.active.add(id); post('agent_start'); return }
+    if (status !== 'completed' && status !== 'failed' && status !== 'aborted') return
+    lifecycleState.active.delete(id)
+    lifecycleState.exited?.delete(id)
+    if (lifecycleState.waiting) postAgentEndOnce()
+  }
+  lifecycleState.onRunnerExit = (event: unknown): void => {
+    const runId = event && typeof event === 'object' ? (event as { runId?: unknown }).runId : undefined
+    if (typeof runId !== 'string' || !lifecycleState.active.has(runId)) return
+    if (!lifecycleState.exited) lifecycleState.exited = new Set<string>()
+    lifecycleState.exited.add(runId)
+    if (!lifecycleState.waiting) return
+    if (runnerExitCheck !== null) clearTimeout(runnerExitCheck)
+    runnerExitCheck = setTimeout(() => {
+      runnerExitCheck = null
+      if (lifecycleState.waiting) postAgentEndOnce()
+    }, RUNNER_EXIT_GRACE_MS)
+    if (typeof runnerExitCheck.unref === 'function') runnerExitCheck.unref()
+  }
   function postAgentEndOnce(): void {
+    for (const id of lifecycleState.exited ?? []) lifecycleState.active.delete(id)
+    lifecycleState.exited?.clear()
+    if (lifecycleState.active.size > 0) {
+      lifecycleState.waiting = true
+      return
+    }
+    lifecycleState.waiting = false
     if (completionPostedGeneration === endedRunGeneration) return
     completionPostedGeneration = endedRunGeneration
     piTurnInFlight = false
