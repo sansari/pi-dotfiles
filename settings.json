@@ -2,7 +2,7 @@
   "packages": [
     "npm:@demigodmode/pi-web-agent"
   ],
-  "lastChangelogVersion": "0.99.2",
+  "lastChangelogVersion": "1.0.0",
   "defaultProvider": "openai-codex",
   "hideThinkingBlock": false,
   "theme": "dark",
