@@ -3,7 +3,7 @@
 ## Visual Verification
 
 - Verify visually inspectable changes yourself before reporting completion.
-- For web UI, use Playwright and browse directly to the relevant local URL; assume local servers/browsing are available unless proven otherwise.
+- For web UI, choose verification appropriate to the change; do not default to Playwright or other browser automation.
 - For CSS/HTML/layout/rendering changes, inspect the changed page and confirm the result.
 - If manual-only verification is required, pause and ask for it explicitly.
 - When a user names a pasted screenshot without a path, look in `~/Screenshots/` first.
