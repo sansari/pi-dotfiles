@@ -8,50 +8,87 @@ let warnedBadEndpoint = false
 // critical path, and the latest-only pending slot prevents a stalled
 // Orca receiver from building an unbounded queue of obsolete snapshots.
 const HOOK_POST_TIMEOUT_MS = 1000
-type HookPost = { hookEventName: string; extra: Record<string, unknown>; metadata: Record<string, unknown>; ompRuntime: boolean; revision: number; attempts: number; delivered: boolean }
-let activePost = false
-let pendingPost: HookPost | null = null
-let latestPost: HookPost | null = null
-// A newer snapshot or session boundary retires every older retry.
-let postRevision = 0
-let retryTimer: ReturnType<typeof setTimeout> | null = null
+type HookPost = { hookEventName: string; extra: Record<string, unknown>; metadata: Record<string, unknown>; ompRuntime: boolean; revision: number; attempts: number; delivered: boolean; final?: boolean }
+type HookPostQueue = { activePost: HookPost | null; pendingPost: HookPost | null; latestPost: HookPost | null; finalPosts: HookPost[]; finalRetryTimer: ReturnType<typeof setTimeout> | null; postRevision: number; retryTimer: ReturnType<typeof setTimeout> | null }
+declare global { var __orcaPiStatusPostQueue: HookPostQueue | undefined }
+const postQueue: HookPostQueue = globalThis.__orcaPiStatusPostQueue ??= { activePost: null, pendingPost: null, latestPost: null, finalPosts: [], finalRetryTimer: null, postRevision: 0, retryTimer: null }
 
 function cancelPostRetry(): void {
-  if (retryTimer !== null) clearTimeout(retryTimer)
-  retryTimer = null
+  if (postQueue.retryTimer !== null) clearTimeout(postQueue.retryTimer)
+  postQueue.retryTimer = null
+}
+
+// Why: a queued or scheduled post builds its body later, so it already carries newer state.
+function hasQueuedPost(): boolean {
+  return postQueue.pendingPost !== null || postQueue.retryTimer !== null
 }
 
 function resetPostQueue(): void {
   cancelPostRetry()
-  postRevision++
-  pendingPost = null
-  latestPost = null
+  postQueue.postRevision++
+  for (const post of [postQueue.activePost, postQueue.pendingPost, postQueue.latestPost]) {
+    if (!post || post.hookEventName !== 'agent_end' || post.delivered || post.final) continue
+    post.final = true
+    postQueue.finalPosts.push(post)
+  }
+  postQueue.pendingPost = null
+  postQueue.latestPost = null
+  drainPosts()
+}
+
+function retireTurnCompletionPosts(metadata: Record<string, unknown>): void {
+  const first = postQueue.finalPosts[0]
+  for (const post of postQueue.finalPosts) {
+    if (post.extra.session_boundary !== true && post.metadata.session_id === metadata.session_id) post.final = false
+  }
+  postQueue.finalPosts = postQueue.finalPosts.filter((post) => post.final)
+  if (first && !first.final && postQueue.finalRetryTimer !== null) {
+    clearTimeout(postQueue.finalRetryTimer)
+    postQueue.finalRetryTimer = null
+  }
 }
 
 function drainPosts(): void {
-  if (activePost || !pendingPost) return
-  const next = pendingPost
-  pendingPost = null
-  activePost = true
-  void postOnce(next.hookEventName, next.extra, next.metadata, next.ompRuntime)
-    .then(() => { next.delivered = true })
+  if (postQueue.activePost || postQueue.finalRetryTimer !== null) return
+  const next = postQueue.finalPosts[0] ?? postQueue.pendingPost
+  if (!next) return
+  if (!next.final) postQueue.pendingPost = null
+  postQueue.activePost = next
+  void postOnce(next.hookEventName, next.extra, next.metadata, next.ompRuntime, next.final === true)
+    .then(() => {
+      next.delivered = true
+      if (next.final) postQueue.finalPosts.shift()
+    })
     .catch(() => {
-      if (!next.ompRuntime || next.revision !== postRevision) return
+      if (next.final) {
+        if (next.attempts >= 3) {
+          postQueue.finalPosts.shift()
+          console.warn('[orca-pi-status] hook delivery failed after retries:', next.hookEventName)
+          return
+        }
+        postQueue.finalRetryTimer = setTimeout(() => {
+          postQueue.finalRetryTimer = null
+          drainPosts()
+        }, 250 * 2 ** next.attempts++)
+        if (typeof postQueue.finalRetryTimer.unref === 'function') postQueue.finalRetryTimer.unref()
+        return
+      }
+      if (!next.ompRuntime || next.revision !== postQueue.postRevision) return
       if (next.attempts >= 3) {
         console.warn('[orca-pi-status] hook delivery failed after retries:', next.hookEventName)
         return
       }
       const delay = 250 * 2 ** next.attempts++
-      retryTimer = setTimeout(() => {
-        retryTimer = null
-        if (next.revision !== postRevision) return
-        pendingPost = next
+      postQueue.retryTimer = setTimeout(() => {
+        postQueue.retryTimer = null
+        if (next.revision !== postQueue.postRevision) return
+        postQueue.pendingPost = next
         drainPosts()
       }, delay)
-      if (typeof retryTimer.unref === 'function') retryTimer.unref()
+      if (typeof postQueue.retryTimer.unref === 'function') postQueue.retryTimer.unref()
     })
     .finally(() => {
-      activePost = false
+      postQueue.activePost = null
       drainPosts()
     })
 }
@@ -85,6 +122,27 @@ function updateModelMetadata(source: unknown): void {
   }
 }
 
+type SubagentDetail = { agentType?: string; description?: string; startedAt: number; workflow?: boolean; parent?: string; registration?: object }
+type SubagentRoster = { active: Set<string>; exited?: Set<string>; details?: Map<string, SubagentDetail>; waiting: boolean; ownsPane?: boolean; runGeneration?: number; endedRunGeneration?: number; completionPostedGeneration?: number; parked?: Map<string, Map<string, SubagentDetail>>; onEvent?: (event: unknown, forcedStatus?: string) => void; listener?: (event: unknown) => void; onRunnerExit?: (event: unknown) => void; runnerExitListener?: (event: unknown) => void; runnerExitCheck?: ReturnType<typeof setTimeout> | null; onRunnerExitSettled?: () => void }
+const MAX_SUBAGENT_SNAPSHOT = 32
+let subagentRoster: SubagentRoster | null = null
+
+function isVisibleSubagent(roster: SubagentRoster, id: string): boolean {
+  return roster.active.has(id) && !roster.exited?.has(id) && roster.details?.get(id)?.workflow !== true
+}
+
+function subagentPayload(): Record<string, unknown> {
+  if (!subagentRoster) return {}
+  const subagents: Record<string, unknown>[] = []
+  for (const id of subagentRoster.active) {
+    if (!isVisibleSubagent(subagentRoster, id)) continue
+    const detail = subagentRoster.details?.get(id)
+    subagents.push({ id, state: 'working', startedAt: detail?.startedAt ?? 0, ...(detail?.agentType ? { agentType: detail.agentType } : {}), ...(detail?.description ? { description: detail.description } : {}) })
+    if (subagents.length >= MAX_SUBAGENT_SNAPSHOT) break
+  }
+  return subagents.length > 0 ? { subagents } : {}
+}
+
 let sessionMetadata: Record<string, unknown> = {}
 let runtimeOmpSessionMetadata: Record<string, unknown> = {}
 
@@ -112,14 +170,14 @@ function getPostSessionMetadata(ompRuntime: boolean): Record<string, unknown> {
   return ompRuntime ? { ...runtimeOmpSessionMetadata, ...modelMetadata } : sessionMetadata
 }
 
-function getPersistedSessionMetadata(): Record<string, unknown> {
-  const sessionFile = sessionMetadata.session_file
+function getPersistedSessionMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const sessionFile = metadata.session_file
   if (typeof sessionFile !== 'string' || !sessionFile) return {}
   try {
     const fs = require('fs')
     // Why: Pi publishes its planned path before creating the transcript;
     // recheck on every post so the first completed turn becomes resumable.
-    return fs.existsSync(sessionFile) ? sessionMetadata : {}
+    return fs.existsSync(sessionFile) ? metadata : {}
   } catch {
     return {}
   }
@@ -211,14 +269,20 @@ function resolveHookPath(ompRuntime: boolean): string {
   return CONFIGURED_HOOK_PATH
 }
 
-function post(hookEventName: string, extra: Record<string, unknown> = {}): void {
+function post(hookEventName: string, extra: Record<string, unknown> = {}, final = false): void {
   const ompRuntime = isOmpRuntime()
-  cancelPostRetry()
   const metadata = getPostSessionMetadata(ompRuntime)
+  if (final) {
+    postQueue.finalPosts.push({ revision: postQueue.postRevision, attempts: 0, delivered: false, hookEventName, extra, metadata, ompRuntime, final })
+    drainPosts()
+    return
+  }
+  cancelPostRetry()
+  if (hookEventName === 'before_agent_start' || hookEventName === 'agent_start') retireTurnCompletionPosts(metadata)
 // Model changes must not erase an unacknowledged completion in the latest-only slot.
-  const previousCompletion = latestPost?.hookEventName === 'agent_end' && !latestPost.delivered && latestPost.metadata.session_id === metadata.session_id
-  pendingPost = {
-    revision: ++postRevision,
+  const previousCompletion = postQueue.latestPost?.hookEventName === 'agent_end' && !postQueue.latestPost.delivered && postQueue.latestPost.metadata.session_id === metadata.session_id
+  postQueue.pendingPost = {
+    revision: ++postQueue.postRevision,
     attempts: 0,
     delivered: false,
     hookEventName: ompRuntime && hookEventName === 'model_select' && previousCompletion ? 'agent_end' : hookEventName,
@@ -226,7 +290,7 @@ function post(hookEventName: string, extra: Record<string, unknown> = {}): void 
     metadata,
     ompRuntime,
   }
-  latestPost = pendingPost
+  postQueue.latestPost = postQueue.pendingPost
   drainPosts()
 }
 
@@ -234,7 +298,8 @@ async function postOnce(
   hookEventName: string,
   extra: Record<string, unknown>,
   metadata: Record<string, unknown>,
-  ompRuntime: boolean
+  ompRuntime: boolean,
+  final: boolean
 ): Promise<void> {
   const coords = resolveHookCoords()
   const paneKey = process.env.ORCA_PANE_KEY
@@ -247,7 +312,7 @@ async function postOnce(
     worktreeId: process.env.ORCA_WORKTREE_ID || '',
     env: coords.env,
     version: coords.version,
-    payload: { hook_event_name: hookEventName, ...(ompRuntime ? metadata : getPersistedSessionMetadata()), ...extra },
+    payload: { hook_event_name: hookEventName, ...(ompRuntime ? metadata : getPersistedSessionMetadata(metadata)), ...(final ? {} : subagentPayload()), ...extra },
   })
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
   let timeout: ReturnType<typeof setTimeout> | undefined
@@ -468,30 +533,35 @@ export default function (pi): void {
   if (ownerPid && ownerPid !== selfPid && isStatusOwnerAlive(ownerPid)) return
   process.env.ORCA_PI_STATUS_OWNED = selfPid
   resetPostQueue()
-  const piEventBus = (pi as { events?: { on?: (name: string, handler: (event: unknown) => void) => void } }).events
-  const lifecycleState = (piEventBus as { __orcaPiSubagents?: { active: Set<string>; exited?: Set<string>; waiting: boolean; onEvent?: (event: unknown, forcedStatus?: string) => void; listener?: (event: unknown) => void; onRunnerExit?: (event: unknown) => void; runnerExitListener?: (event: unknown) => void } } | undefined)?.__orcaPiSubagents ?? { active: new Set<string>(), waiting: false }
-  if (piEventBus) (piEventBus as { __orcaPiSubagents?: unknown }).__orcaPiSubagents = lifecycleState
-  if (piEventBus?.on && !(lifecycleState as { listener?: unknown }).listener) {
-    const listener = (event: unknown) => lifecycleState.onEvent?.(event)
-    lifecycleState.listener = listener
-    piEventBus.on('task:subagent:lifecycle', listener)
+  const piEventBus = (pi as { events?: { __orcaPiSubagents?: SubagentRoster; __orcaPiSubagentsHeard?: boolean; __orcaPiRunnerExitsHeard?: boolean; on?: (name: string, handler: (event: unknown) => void) => void } }).events
+  const runStateHome: { __orcaPiSubagents?: SubagentRoster } | undefined = isOmpRuntime() ? piEventBus : (globalThis as { __orcaPiSubagents?: SubagentRoster })
+  const busRoster = piEventBus?.__orcaPiSubagents
+  const lifecycleState: SubagentRoster = busRoster ?? runStateHome?.__orcaPiSubagents ?? { active: new Set<string>(), waiting: false }
+  if (runStateHome) runStateHome.__orcaPiSubagents = lifecycleState
+  const subagentDetails = (lifecycleState.details ??= new Map<string, SubagentDetail>())
+  lifecycleState.runGeneration ??= 0
+  lifecycleState.endedRunGeneration ??= 0
+  lifecycleState.completionPostedGeneration ??= -1
+  subagentRoster ??= lifecycleState
+  const ownsPaneRoster = subagentRoster === lifecycleState
+  const registration = {}
+  function resetSubagentRoster(): void {
+    clearRunnerExitCheck()
+    lifecycleState.active.clear()
+    lifecycleState.exited?.clear()
+    subagentDetails.clear()
+    lifecycleState.waiting = false
+  }
+  if (ownsPaneRoster && piEventBus?.on && !piEventBus.__orcaPiSubagentsHeard && !busRoster?.listener) {
+    piEventBus.__orcaPiSubagentsHeard = true
+    piEventBus.on('task:subagent:lifecycle', (event: unknown) => lifecycleState.onEvent?.(event))
     piEventBus.on('subagent:async-started', (event: unknown) => lifecycleState.onEvent?.(event, 'started'))
     piEventBus.on('subagent:async-complete', (event: unknown) => lifecycleState.onEvent?.(event, 'completed'))
   }
-  if (piEventBus?.on && !lifecycleState.runnerExitListener) {
-    const runnerExitListener = (event: unknown) => lifecycleState.onRunnerExit?.(event)
-    lifecycleState.runnerExitListener = runnerExitListener
-    piEventBus.on('subagent:process-terminal', runnerExitListener)
+  if (ownsPaneRoster && piEventBus?.on && !piEventBus.__orcaPiRunnerExitsHeard && !busRoster?.runnerExitListener) {
+    piEventBus.__orcaPiRunnerExitsHeard = true
+    piEventBus.on('subagent:process-terminal', (event: unknown) => lifecycleState.onRunnerExit?.(event))
   }
-  pi.on('session_switch', (_event, ctx) => {
-    if (!isOmpRuntime()) return
-    lifecycleState.active.clear()
-    lifecycleState.exited?.clear()
-    lifecycleState.waiting = false
-    resetPostQueue()
-    clearPendingAgentEndCheck()
-    updateRuntimeOmpSessionMetadata(ctx)
-  })
   // SessionManager survives reload/new/resume; task children own a different instance.
   function sessionProvenance(ctx): { manager: unknown; id?: string; file?: string; parent?: string } | undefined {
     const manager = ctx?.sessionManager
@@ -546,11 +616,46 @@ export default function (pi): void {
   function onStatus(name, handler): void {
     pi.on(name, (event, ctx) => {
       if (!ownsSessionStatus(ctx)) return
+      lifecycleState.ownsPane = true
       return handler(event, ctx)
     })
   }
 
   onStatus('session_start', () => {})
+
+  const onOmpSessionChange = (event, ctx) => {
+    if (!isOmpRuntime()) return
+    if (event?.reason === 'fork' || event?.reason === 'resume') {
+      if (isTurnInFlight()) {
+        lifecycleState.endedRunGeneration = lifecycleState.runGeneration
+        postAgentEndOnce()
+      }
+    } else {
+      closeOutRun()
+    }
+    updateRuntimeOmpSessionMetadata(ctx)
+  }
+  pi.on('session_switch', onOmpSessionChange)
+  pi.on('session_branch', onOmpSessionChange)
+  onStatus('session_shutdown', (event) => {
+    clearPendingAgentEndCheck()
+    if (isOmpRuntime()) {
+      clearRunnerExitCheck()
+      resetPostQueue()
+      return
+    }
+    piUiPromptDepth = 0
+    const reason = (event as { reason?: unknown } | null)?.reason
+    const target = (event as { targetSessionFile?: unknown } | null)?.targetSessionFile
+    const keepsSession = reason === 'reload' || (reason === 'resume' && typeof target === 'string' && target === sessionMetadata.session_file)
+    if (!keepsSession) clearRunnerExitCheck()
+    if (keepsSession || reason === 'quit') {
+      resetPostQueue()
+      return
+    }
+    closeOutRun(sessionMetadata.session_file)
+    lifecycleState.onEvent = undefined
+  })
 
   if (isOmpRuntime() && typeof pi.registerCommand === 'function' && typeof pi.setModel === 'function') {
     pi.registerCommand('orca-model', {
@@ -580,6 +685,8 @@ export default function (pi): void {
     // turn boundary and must not clear the visible status or unread state.
     if (event.reason === 'reload') return
     post('session_start')
+    restoreParkedSubagents()
+    if (lifecycleState.waiting) post('agent_start')
   })
 
   onStatus('before_agent_start', (event, ctx) => {
@@ -591,7 +698,7 @@ export default function (pi): void {
     updateRuntimeOmpSessionMetadata(ctx)
     clearPendingAgentEndCheck()
     lifecycleState.waiting = false
-    runGeneration += 1
+    lifecycleState.runGeneration += 1
     piUiPromptDepth = 0
     piTurnInFlight = true
     post('agent_start')
@@ -661,18 +768,9 @@ export default function (pi): void {
     } catch {
       // Why: a runner this very modal invalidated cannot answer; keep the local verdict.
     }
+    // Why: Pi reports idle once its own turn settles, but children still hold the run open.
+    isIdle &&= !isHeldByChildren()
     post('ui_prompt_end', { is_idle: isIdle })
-  })
-
-  onStatus('session_shutdown', () => {
-    resetPostQueue()
-    clearPendingAgentEndCheck()
-    if (isOmpRuntime()) return
-    // Why: pi tears an open dialog down through resetExtensionUI without resolving its
-    // promise, so a replaced session never emits the matching ui_prompt_end and the wait
-    // would stick forever. Reset without posting: shutdown is not a turn boundary, and
-    // the session_start that follows republishes the corrected state.
-    piUiPromptDepth = 0
   })
 
   pi.on('model_select', (event, ctx) => {
@@ -701,9 +799,6 @@ export default function (pi): void {
   const AGENT_END_IDLE_RECHECK_MS = 25
   const AGENT_END_IDLE_RECHECK_MAX_MS = 250
   let agentSettledSupported = false
-  let runGeneration = 0
-  let endedRunGeneration = 0
-  let completionPostedGeneration = -1
   let agentEndIdleRecheckMs = AGENT_END_IDLE_RECHECK_MS
   let pendingAgentEndCheck: ReturnType<typeof setTimeout> | null = null
   let pendingAgentEndContext: { isIdle: () => boolean } | null = null
@@ -714,50 +809,123 @@ export default function (pi): void {
     pendingAgentEndContext = null
   }
   const RUNNER_EXIT_GRACE_MS = 2000
-  let runnerExitCheck: ReturnType<typeof setTimeout> | null = null
+  function clearRunnerExitCheck(): void {
+    if (lifecycleState.runnerExitCheck != null) clearTimeout(lifecycleState.runnerExitCheck)
+    lifecycleState.runnerExitCheck = null
+  }
+  function forgetSubagent(id: string): void {
+    lifecycleState.active.delete(id)
+    lifecycleState.exited?.delete(id)
+    subagentDetails.delete(id)
+  }
+  function postSubagentsUpdate(): void {
+    if (!hasQueuedPost()) post('subagents_update')
+  }
+  const readLabel = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value : undefined
   lifecycleState.onEvent = (event: unknown, forcedStatus?: string): void => {
     if (!event || typeof event !== 'object') return
-    const record = event as { id?: unknown; runId?: unknown }
+    const record = event as { id?: unknown; runId?: unknown; agent?: unknown; description?: unknown; mode?: unknown; parentWorkflowRunId?: unknown }
     const id = typeof record.id === 'string' && record.id ? record.id : typeof record.runId === 'string' ? record.runId : ''
     const status = forcedStatus ?? (event as { status?: unknown }).status
     if (!id) return
-    if (status === 'started') { lifecycleState.active.add(id); post('agent_start'); return }
+    if (isOmpRuntime() && !lifecycleState.ownsPane) return
+    if (status === 'started') {
+      lifecycleState.active.add(id)
+      if (!subagentDetails.has(id)) subagentDetails.set(id, { agentType: readLabel(record.agent), description: readLabel(record.description), startedAt: Date.now(), workflow: record.mode === 'workflow', parent: readLabel(record.parentWorkflowRunId), registration })
+      if (!isTurnInFlight() && (isOmpRuntime() || lifecycleState.runGeneration === 0 || lifecycleState.completionPostedGeneration === lifecycleState.runGeneration)) {
+        lifecycleState.waiting = true
+        lifecycleState.completionPostedGeneration = -1
+      }
+      post('agent_start')
+      return
+    }
     if (status !== 'completed' && status !== 'failed' && status !== 'aborted') return
-    lifecycleState.active.delete(id)
-    lifecycleState.exited?.delete(id)
+    let wasVisible = isVisibleSubagent(lifecycleState, id)
+    forgetSubagent(id)
+    for (const [childId, detail] of subagentDetails) {
+      if (detail.parent !== id || detail.registration === registration) continue
+      wasVisible ||= isVisibleSubagent(lifecycleState, childId)
+      forgetSubagent(childId)
+    }
+    if (lifecycleState.waiting && postAgentEndOnce()) return
+    if (wasVisible) postSubagentsUpdate()
+  }
+  lifecycleState.onRunnerExitSettled = (): void => {
     if (lifecycleState.waiting) postAgentEndOnce()
   }
   lifecycleState.onRunnerExit = (event: unknown): void => {
     const runId = event && typeof event === 'object' ? (event as { runId?: unknown }).runId : undefined
     if (typeof runId !== 'string' || !lifecycleState.active.has(runId)) return
     if (!lifecycleState.exited) lifecycleState.exited = new Set<string>()
+    const wasVisible = isVisibleSubagent(lifecycleState, runId)
     lifecycleState.exited.add(runId)
+    if (wasVisible) postSubagentsUpdate()
     if (!lifecycleState.waiting) return
-    if (runnerExitCheck !== null) clearTimeout(runnerExitCheck)
-    runnerExitCheck = setTimeout(() => {
-      runnerExitCheck = null
-      if (lifecycleState.waiting) postAgentEndOnce()
+    clearRunnerExitCheck()
+    lifecycleState.runnerExitCheck = setTimeout(() => {
+      lifecycleState.runnerExitCheck = null
+      lifecycleState.onRunnerExitSettled?.()
     }, RUNNER_EXIT_GRACE_MS)
-    if (typeof runnerExitCheck.unref === 'function') runnerExitCheck.unref()
+    if (typeof lifecycleState.runnerExitCheck.unref === 'function') lifecycleState.runnerExitCheck.unref()
   }
-  function postAgentEndOnce(): void {
-    for (const id of lifecycleState.exited ?? []) lifecycleState.active.delete(id)
-    lifecycleState.exited?.clear()
-    if (lifecycleState.active.size > 0) {
+  function isHeldByChildren(): boolean {
+    return lifecycleState.active.size > 0
+  }
+
+  function isTurnInFlight(): boolean {
+    return lifecycleState.runGeneration !== lifecycleState.endedRunGeneration
+  }
+
+  function postAgentEndOnce(final = false): boolean {
+    for (const id of lifecycleState.exited ?? []) forgetSubagent(id)
+    if (isHeldByChildren()) {
       lifecycleState.waiting = true
-      return
+      return false
     }
     lifecycleState.waiting = false
-    if (completionPostedGeneration === endedRunGeneration) return
-    completionPostedGeneration = endedRunGeneration
+    if (lifecycleState.completionPostedGeneration === lifecycleState.endedRunGeneration) return false
+    lifecycleState.completionPostedGeneration = lifecycleState.endedRunGeneration
     piTurnInFlight = false
-    post('agent_end')
+    post('agent_end', final ? { session_boundary: true } : {}, final)
+    return true
+  }
+
+  function restoreParkedSubagents(): void {
+    const file = sessionMetadata.session_file
+    if (typeof file !== 'string') return
+    const parked = lifecycleState.parked?.get(file)
+    if (!parked) return
+    lifecycleState.parked?.delete(file)
+    for (const [id, detail] of parked) {
+      lifecycleState.active.add(id)
+      subagentDetails.set(id, detail)
+    }
+    if (!isHeldByChildren()) return
+    lifecycleState.waiting = true
+    lifecycleState.completionPostedGeneration = -1
+  }
+
+  function closeOutRun(parkUnder?: unknown): void {
+    const unsettled = lifecycleState.waiting || isTurnInFlight()
+    if (typeof parkUnder === 'string' && isHeldByChildren()) {
+      const parked = new Map<string, SubagentDetail>()
+      for (const id of lifecycleState.active) {
+        const detail = subagentDetails.get(id)
+        if (detail && !lifecycleState.exited?.has(id)) parked.set(id, detail)
+      }
+      ;(lifecycleState.parked ??= new Map()).set(parkUnder, parked)
+    }
+    resetSubagentRoster()
+    resetPostQueue()
+    if (!unsettled) return
+    lifecycleState.endedRunGeneration = lifecycleState.runGeneration
+    postAgentEndOnce(true)
   }
 
   function checkPendingAgentEnd(): void {
     pendingAgentEndCheck = null
     const ctx = pendingAgentEndContext
-    if (!ctx || agentSettledSupported || completionPostedGeneration === endedRunGeneration) {
+    if (!ctx || agentSettledSupported || lifecycleState.completionPostedGeneration === lifecycleState.endedRunGeneration) {
       pendingAgentEndContext = null
       return
     }
@@ -789,7 +957,7 @@ export default function (pi): void {
       clearPendingAgentEndCheck()
       return
     }
-    endedRunGeneration = runGeneration
+    lifecycleState.endedRunGeneration = lifecycleState.runGeneration
     if (isOmpRuntime()) {
       postAgentEndOnce()
       return
