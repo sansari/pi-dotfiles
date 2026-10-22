@@ -2,17 +2,11 @@
 
 ## Visual Verification
 
-- Verify visually inspectable changes yourself before reporting completion.
-- For web UI, choose verification appropriate to the change; do not default to Playwright or other browser automation.
-- For CSS/HTML/layout/rendering changes, inspect the changed page and confirm the result.
-- If manual-only verification is required, pause and ask for it explicitly.
-- When a user names a pasted screenshot without a path, look in `~/Screenshots/` first.
-
-### Native macOS apps (no browser available)
-
-- Capture the target app window by `CGWindowNumber`, not full-screen or fixed-region screenshots.
-- Find the window id with `CGWindowListCopyWindowInfo`, then run `screencapture -x -o -l<windowid> /tmp/out.png`.
-- If Screen Recording permission blocks capture, ask the user to grant it; crop/zoom with `ffmpeg ... -frames:v 1` when needed.
+- Never capture, open, or inspect screenshots solely to verify changes, and do not request Screen Recording permission for verification.
+- For web UI, use non-screenshot browser or DOM interaction checks when they provide useful evidence; do not default to browser automation when focused automated tests are sufficient.
+- When reliable non-screenshot UI automation is unavailable, leave visual verification to the user. Report the automated evidence completed, but do not block completion, commits, or pushes on visual verification.
+- **Magtrak exception:** For `/Users/dare/code/magtrak`, the user exclusively owns all UI and runtime verification. Do not navigate, capture, inspect, or automate the Magtrak app, and do not ask the user to click through a verification flow or say when it is ready. Continue running required automated builds/tests and reinstalling the app when the project instructions require it.
+- User-provided screenshots may still be inspected when the user asks for diagnosis or references a visible issue. When a user names a pasted screenshot without a path, look in `~/Screenshots/` first.
 
 ## UI theme colors
 
@@ -47,7 +41,7 @@ For non-trivial implementation work:
 1. Implement the scoped change, then self-review the stable diff for requirements, correctness, error paths, lifecycle/races, regressions, and test evidence.
 2. Request a fresh-context `code-reviewer` only for security/privacy, persistence or data-loss risk, concurrency/process/session lifecycle, public APIs/protocols, shared architecture, substantial refactors, inadequate evidence/uncertainty, or when the user asks.
 3. Run focused non-UI tests first (60-second default for unit tests). A required review may run in parallel once the diff is stable; fix blockers and rerun affected tests.
-4. Visually verify directly affected UI. Run UI automation only at the final pre-push stage.
+4. For affected UI, use reliable non-screenshot automation when appropriate; otherwise leave visual verification to the user without making it a completion or push gate.
 5. For 2119 work, fresh-context spec critique and test-honesty review remain mandatory; run `npx rfc2119 check` immediately before pushing.
 
 ## Commits
