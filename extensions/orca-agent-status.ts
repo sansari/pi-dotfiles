@@ -824,14 +824,14 @@ export default function (pi): void {
   const readLabel = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value : undefined
   lifecycleState.onEvent = (event: unknown, forcedStatus?: string): void => {
     if (!event || typeof event !== 'object') return
-    const record = event as { id?: unknown; runId?: unknown; agent?: unknown; description?: unknown; mode?: unknown; parentWorkflowRunId?: unknown }
+    const record = event as { id?: unknown; runId?: unknown; agent?: unknown; description?: unknown; workflowKey?: unknown; mode?: unknown; parentWorkflowRunId?: unknown }
     const id = typeof record.id === 'string' && record.id ? record.id : typeof record.runId === 'string' ? record.runId : ''
     const status = forcedStatus ?? (event as { status?: unknown }).status
     if (!id) return
     if (isOmpRuntime() && !lifecycleState.ownsPane) return
     if (status === 'started') {
       lifecycleState.active.add(id)
-      if (!subagentDetails.has(id)) subagentDetails.set(id, { agentType: readLabel(record.agent), description: readLabel(record.description), startedAt: Date.now(), workflow: record.mode === 'workflow', parent: readLabel(record.parentWorkflowRunId), registration })
+      if (!subagentDetails.has(id)) subagentDetails.set(id, { agentType: readLabel(record.agent), description: readLabel(record.description) ?? readLabel(record.workflowKey), startedAt: Date.now(), workflow: record.mode === 'workflow', parent: readLabel(record.parentWorkflowRunId), registration })
       if (!isTurnInFlight() && (isOmpRuntime() || lifecycleState.runGeneration === 0 || lifecycleState.completionPostedGeneration === lifecycleState.runGeneration)) {
         lifecycleState.waiting = true
         lifecycleState.completionPostedGeneration = -1
