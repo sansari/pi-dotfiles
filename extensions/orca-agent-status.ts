@@ -124,36 +124,21 @@ function updateModelMetadata(source: unknown): void {
 
 type SubagentDetail = { agentType?: string; description?: string; startedAt: number; workflow?: boolean; parent?: string; registration?: object }
 type SubagentRoster = { active: Set<string>; exited?: Set<string>; details?: Map<string, SubagentDetail>; waiting: boolean; ownsPane?: boolean; runGeneration?: number; endedRunGeneration?: number; completionPostedGeneration?: number; parked?: Map<string, Map<string, SubagentDetail>>; onEvent?: (event: unknown, forcedStatus?: string) => void; listener?: (event: unknown) => void; onRunnerExit?: (event: unknown) => void; runnerExitListener?: (event: unknown) => void; runnerExitCheck?: ReturnType<typeof setTimeout> | null; onRunnerExitSettled?: () => void }
-const HOOK_BODY_BUDGET_BYTES = 500000
-const SUBAGENTS_FIELD_BYTES = Buffer.byteLength(',"subagents":[]')
+const MAX_SUBAGENT_SNAPSHOT = 32
 let subagentRoster: SubagentRoster | null = null
 
 function isVisibleSubagent(roster: SubagentRoster, id: string): boolean {
   return roster.active.has(id) && !roster.exited?.has(id) && roster.details?.get(id)?.workflow !== true
 }
 
-function subagentPreview(value: string | undefined, maxLength: number): string | undefined {
-  if (typeof value !== 'string') return undefined
-  let preview = value.slice(0, maxLength * 8 + 64).trimStart().replace(/[\r\n\u2028\u2029]+/g, ' ').slice(0, maxLength)
-  if (preview.length < maxLength) preview = preview.trimEnd()
-  else if (/[\ud800-\udbff]$/.test(preview)) preview = preview.slice(0, -1)
-  return preview || undefined
-}
-
-function subagentPayload(byteBudget: number): Record<string, unknown> {
+function subagentPayload(): Record<string, unknown> {
   if (!subagentRoster) return {}
   const subagents: Record<string, unknown>[] = []
-  let bytes = SUBAGENTS_FIELD_BYTES
   for (const id of subagentRoster.active) {
     if (!isVisibleSubagent(subagentRoster, id)) continue
     const detail = subagentRoster.details?.get(id)
-    const agentType = subagentPreview(detail?.agentType, 40)
-    const description = subagentPreview(detail?.description, 160)
-    const subagent = { id, state: 'working', startedAt: detail?.startedAt ?? 0, ...(agentType ? { agentType } : {}), ...(description ? { description } : {}) }
-    const rowBytes = Buffer.byteLength(JSON.stringify(subagent)) + (subagents.length > 0 ? 1 : 0)
-    if (bytes + rowBytes > byteBudget) continue
-    bytes += rowBytes
-    subagents.push(subagent)
+    subagents.push({ id, state: 'working', startedAt: detail?.startedAt ?? 0, ...(detail?.agentType ? { agentType: detail.agentType } : {}), ...(detail?.description ? { description: detail.description } : {}) })
+    if (subagents.length >= MAX_SUBAGENT_SNAPSHOT) break
   }
   return subagents.length > 0 ? { subagents } : {}
 }
@@ -320,17 +305,15 @@ async function postOnce(
   const paneKey = process.env.ORCA_PANE_KEY
   if (!coords.port || !coords.token || !paneKey) return
   const url = `http://127.0.0.1:${coords.port}${resolveHookPath(ompRuntime)}`
-  const bodyWith = (subagents: Record<string, unknown>): string => JSON.stringify({
+  const body = JSON.stringify({
     paneKey,
     launchToken: process.env.ORCA_AGENT_LAUNCH_TOKEN || '',
     tabId: process.env.ORCA_TAB_ID || '',
     worktreeId: process.env.ORCA_WORKTREE_ID || '',
     env: coords.env,
     version: coords.version,
-    payload: { hook_event_name: hookEventName, ...(ompRuntime ? metadata : getPersistedSessionMetadata(metadata)), ...subagents, ...extra },
+    payload: { hook_event_name: hookEventName, ...(ompRuntime ? metadata : getPersistedSessionMetadata(metadata)), ...(final ? {} : subagentPayload()), ...extra },
   })
-  const bareBody = bodyWith({})
-  const body = final ? bareBody : bodyWith(subagentPayload(HOOK_BODY_BUDGET_BYTES - Buffer.byteLength(bareBody)))
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
   let timeout: ReturnType<typeof setTimeout> | undefined
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
@@ -841,14 +824,14 @@ export default function (pi): void {
   const readLabel = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value : undefined
   lifecycleState.onEvent = (event: unknown, forcedStatus?: string): void => {
     if (!event || typeof event !== 'object') return
-    const record = event as { id?: unknown; runId?: unknown; agent?: unknown; description?: unknown; workflowKey?: unknown; mode?: unknown; parentWorkflowRunId?: unknown }
+    const record = event as { id?: unknown; runId?: unknown; agent?: unknown; description?: unknown; mode?: unknown; parentWorkflowRunId?: unknown }
     const id = typeof record.id === 'string' && record.id ? record.id : typeof record.runId === 'string' ? record.runId : ''
     const status = forcedStatus ?? (event as { status?: unknown }).status
     if (!id) return
     if (isOmpRuntime() && !lifecycleState.ownsPane) return
     if (status === 'started') {
       lifecycleState.active.add(id)
-      if (!subagentDetails.has(id)) subagentDetails.set(id, { agentType: readLabel(record.agent), description: readLabel(record.description) ?? readLabel(record.workflowKey), startedAt: Date.now(), workflow: record.mode === 'workflow', parent: readLabel(record.parentWorkflowRunId), registration })
+      if (!subagentDetails.has(id)) subagentDetails.set(id, { agentType: readLabel(record.agent), description: readLabel(record.description), startedAt: Date.now(), workflow: record.mode === 'workflow', parent: readLabel(record.parentWorkflowRunId), registration })
       if (!isTurnInFlight() && (isOmpRuntime() || lifecycleState.runGeneration === 0 || lifecycleState.completionPostedGeneration === lifecycleState.runGeneration)) {
         lifecycleState.waiting = true
         lifecycleState.completionPostedGeneration = -1
